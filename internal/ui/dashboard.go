@@ -86,7 +86,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selected = 0
 			return m, nil
 		}
-		if m.current == search {
+		if m.current == search && !searchCommand(key) {
 			if key == "backspace" {
 				if len(m.query) > 0 {
 					m.query = m.query[:len(m.query)-1]
@@ -277,4 +277,13 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func searchCommand(key string) bool {
+	switch key {
+	case "up", "down", "k", "j", "a", "d", " ", "c", "enter", "l", "right", "r", "b", "/", "esc", "q", "ctrl+c":
+		return true
+	default:
+		return false
+	}
 }
