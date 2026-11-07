@@ -26,6 +26,9 @@ type Workspace struct {
 
 type Assignment struct {
 	RepoID  string     `json:"repoId"`
+	Name    string     `json:"name,omitempty"`
+	Path    string     `json:"path,omitempty"`
+	Remote  string     `json:"remote,omitempty"`
 	Note    string     `json:"note,omitempty"`
 	AddedAt time.Time  `json:"addedAt"`
 	Done    bool       `json:"done"`

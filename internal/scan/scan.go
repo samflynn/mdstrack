@@ -82,6 +82,8 @@ func normalizeRemote(remote string) string {
 	remote = strings.TrimSuffix(strings.TrimSpace(remote), ".git")
 	remote = strings.TrimPrefix(remote, "https://github.com/")
 	remote = strings.TrimPrefix(remote, "git@github.com:")
+	remote = strings.TrimPrefix(remote, "git@github.ubc.ca:")
+	remote = strings.TrimPrefix(remote, "https://github.ubc.ca/")
 	return remote
 }
 

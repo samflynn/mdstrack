@@ -10,6 +10,17 @@ mds setup MDS ~/Documents/MDS you@student.ubc.ca "Your Name"
 mds
 ```
 
+To use an enterprise host such as UBC GitHub, pass it as the final setup argument:
+
+```bash
+mds setup MDS ~/Documents/MDS you@student.ubc.ca "Your Name" github.ubc.ca
+```
+
+Inside the dashboard, press `b` to browse discovered local repositories and
+repositories available through the configured GitHub host. Use `a` to add a
+repository to the current week, `d` to remove it, `Space` to mark it done,
+`c` to clone a remote repository, and `Enter` to open a local working copy.
+
 The dashboard is intentionally read-only with respect to git history: it never stages, commits, rebases, or modifies a repository.
 
 ## Current commands

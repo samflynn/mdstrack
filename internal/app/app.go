@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"mdstrack/internal/gh"
 	"mdstrack/internal/model"
 	"mdstrack/internal/scan"
 	"mdstrack/internal/store"
@@ -86,7 +88,11 @@ func (p *Program) setup(args []string) error {
 	if len(args) > 3 {
 		gitName = args[3]
 	}
-	gh := model.GitHub{Host: "github.com", State: ghState()}
+	host := "github.com"
+	if len(args) > 4 && strings.TrimSpace(args[4]) != "" {
+		host = strings.TrimSpace(args[4])
+	}
+	gh := model.GitHub{Host: host, State: gh.State(context.Background(), host)}
 	p.state.Workspaces[id] = model.Workspace{ID: id, Name: name, Root: root, User: model.Identity{Name: gitName, Email: args[2]}, GitHub: gh, CreatedAt: time.Now()}
 	p.state.ActiveWorkspace = id
 	store.EnsureWeek(&p.state, id, time.Now())
@@ -178,7 +184,7 @@ func (p *Program) dashboard(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return ui.Run(snapshot, func() (ui.Snapshot, error) { return p.snapshot(ctx) }, func(name string) error { return p.mutate([]string{"done", name}) })
+	return ui.Run(snapshot, func() (ui.Snapshot, error) { return p.snapshot(ctx) }, p.applyUIAction)
 }
 
 func (p *Program) snapshot(ctx context.Context) (ui.Snapshot, error) {
@@ -187,12 +193,85 @@ func (p *Program) snapshot(ctx context.Context) (ui.Snapshot, error) {
 		return ui.Snapshot{}, err
 	}
 	entries := assignmentsByID(week)
-	assigned := p.assigned(week, repos)
-	rows := make([]ui.Repo, 0, len(assigned))
-	for _, repo := range assigned {
-		rows = append(rows, ui.Repo{Name: repo.Name, Branch: repo.Branch, YourCommits: repo.YourCommits, Dirty: repo.Dirty, Done: entries[repo.ID].Done})
+	rows := make([]ui.Repo, 0, len(repos))
+	for _, repo := range repos {
+		_, assigned := entries[repo.ID]
+		rows = append(rows, ui.Repo{ID: repo.ID, Name: repo.Name, Path: repo.Path, Remote: repo.Remote, Branch: repo.Branch, YourCommits: repo.YourCommits, Dirty: repo.Dirty, Done: entries[repo.ID].Done, Assigned: assigned})
 	}
-	return ui.Snapshot{Workspace: ws.Name, Week: week.Name, Deadline: week.Deadline, Repos: rows}, nil
+	remote, remoteErr := gh.MyRepos(ctx, ws.GitHub.Host)
+	if remoteErr == nil {
+		for _, repo := range remote {
+			_, assigned := entries["remote:"+repo.FullName]
+			rows = append(rows, ui.Repo{ID: "remote:" + repo.FullName, Name: repo.Name, Remote: repo.FullName, URL: repo.URL, RemoteOnly: true, Assigned: assigned, Done: entries["remote:"+repo.FullName].Done})
+		}
+	}
+	for _, entry := range week.Entries {
+		found := false
+		for _, row := range rows {
+			if row.ID == entry.RepoID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			rows = append(rows, ui.Repo{ID: entry.RepoID, Name: entry.Name, Path: entry.Path, Remote: entry.Remote, Assigned: true, Done: entry.Done, RemoteOnly: entry.Path == ""})
+		}
+	}
+	return ui.Snapshot{Workspace: ws.Name, Week: week.Name, Deadline: week.Deadline, Repos: rows, GitHubHost: ws.GitHub.Host, GitHubState: ws.GitHub.State}, nil
+}
+
+func (p *Program) applyUIAction(action ui.Action, repo ui.Repo) error {
+	ws, week, err := p.active()
+	if err != nil {
+		return err
+	}
+	if action == ui.ActionClone {
+		if repo.Remote == "" {
+			return fmt.Errorf("this repository has no remote URL")
+		}
+		destination := filepath.Join(ws.Root, repo.Name)
+		if _, err := os.Stat(destination); err == nil {
+			return fmt.Errorf("%s already exists", destination)
+		}
+		return gh.Clone(context.Background(), ws.GitHub.Host, repo.Remote, destination)
+	}
+	index := -1
+	for i, entry := range week.Entries {
+		if entry.RepoID == repo.ID {
+			index = i
+			break
+		}
+	}
+	switch action {
+	case ui.ActionAdd:
+		if index >= 0 {
+			return fmt.Errorf("%s is already assigned", repo.Name)
+		}
+		week.Entries = append(week.Entries, model.Assignment{RepoID: repo.ID, Name: repo.Name, Path: repo.Path, Remote: repo.Remote, AddedAt: time.Now()})
+	case ui.ActionRemove:
+		if index < 0 {
+			return fmt.Errorf("%s is not assigned", repo.Name)
+		}
+		week.Entries = append(week.Entries[:index], week.Entries[index+1:]...)
+	case ui.ActionDone:
+		if index < 0 {
+			return fmt.Errorf("%s is not assigned", repo.Name)
+		}
+		now := time.Now()
+		week.Entries[index].Done = !week.Entries[index].Done
+		if week.Entries[index].Done {
+			week.Entries[index].DoneAt = &now
+		} else {
+			week.Entries[index].DoneAt = nil
+		}
+	case ui.ActionOpen:
+		if repo.Path == "" {
+			return fmt.Errorf("clone the repository before opening it")
+		}
+		return openPath(repo.Path)
+	}
+	store.PutWeek(&p.state, ws.ID, week)
+	return p.store.Save(p.state)
 }
 
 func (p *Program) assigned(week model.Week, repos []model.Repo) []model.Repo {
@@ -390,27 +469,24 @@ func (p *Program) workspace(args []string) error {
 	return fmt.Errorf("usage: mds workspace list|use <name>")
 }
 func (p *Program) auth(args []string) error {
-	state := ghState()
-	if contains(args, "--json") {
-		return json.NewEncoder(p.out).Encode(map[string]string{"state": state, "host": "github.com"})
+	host := "github.com"
+	if p.state.ActiveWorkspace != "" {
+		if workspace, ok := p.state.Workspaces[p.state.ActiveWorkspace]; ok {
+			host = workspace.GitHub.Host
+		}
 	}
-	fmt.Fprintf(p.out, "github.com: %s\n", state)
+	state := gh.State(context.Background(), host)
+	if contains(args, "--json") {
+		return json.NewEncoder(p.out).Encode(map[string]string{"state": state, "host": host})
+	}
+	fmt.Fprintf(p.out, "%s: %s\n", host, state)
 	if state != "ok" {
-		fmt.Fprintln(p.out, "Run: gh auth login --hostname github.com --git-protocol https --web")
+		fmt.Fprintf(p.out, "Run: gh auth login --hostname %s --git-protocol https --web\n", host)
 	}
 	return nil
 }
-func ghState() string {
-	if _, err := exec.LookPath("gh"); err != nil {
-		return "missing"
-	}
-	if err := exec.Command("gh", "auth", "status", "--hostname", "github.com").Run(); err != nil {
-		return "unauthenticated"
-	}
-	return "ok"
-}
 func (p *Program) help() {
-	fmt.Fprint(p.out, "mds — MDS repository tracker\n\nCommands:\n  mds setup <name> <root> <email> [git-name]\n  mds [dashboard]\n  mds status [--json]\n  mds scan [--json]\n  mds add|remove|done <repo>\n  mds week name <name>\n  mds week due <YYYY-MM-DD [HH:MM]|none>\n  mds workspace list|use <name>\n  mds auth [--json]\n")
+	fmt.Fprint(p.out, "mds — MDS repository tracker\n\nCommands:\n  mds setup <name> <root> <email> [git-name] [github-host]\n  mds [dashboard]\n  mds status [--json]\n  mds scan [--json]\n  mds add|remove|done <repo>\n  mds week name <name>\n  mds week due <YYYY-MM-DD [HH:MM]|none>\n  mds workspace list|use <name>\n  mds auth [--json]\n")
 }
 func contains(values []string, wanted string) bool {
 	for _, v := range values {
@@ -423,6 +499,17 @@ func contains(values []string, wanted string) bool {
 func isTerminal() bool {
 	info, err := os.Stdin.Stat()
 	return err == nil && (info.Mode()&os.ModeCharDevice) != 0
+}
+
+func openPath(path string) error {
+	command := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		command = "open"
+	}
+	if runtime.GOOS == "windows" {
+		command = "explorer"
+	}
+	return exec.Command(command, path).Start()
 }
 
 var _ = strconv.Itoa
