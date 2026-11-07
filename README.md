@@ -28,4 +28,4 @@ State is written atomically to the platform config directory, normally `~/.confi
 
 ## Architecture
 
-The implementation is split into `internal/store`, `internal/scan`, `internal/git`, and `internal/app`. It currently uses a standard-library interactive terminal loop because this build environment cannot resolve Bubble Tea's `golang.org/x/*` dependencies. The domain, store, scanner, and CLI surfaces are independent of the UI layer so Bubble Tea can replace the presentation loop without changing data or git behavior.
+The implementation is split into `internal/store`, `internal/scan`, `internal/git`, `internal/ui`, and `internal/app`. The interactive dashboard uses Bubble Tea and Lip Gloss; the domain, store, scanner, and CLI surfaces remain independent from the UI layer.

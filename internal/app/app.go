@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"mdstrack/internal/model"
 	"mdstrack/internal/scan"
 	"mdstrack/internal/store"
+	"mdstrack/internal/ui"
 )
 
 type Program struct {
@@ -171,45 +171,28 @@ func (p *Program) status(ctx context.Context, asJSON bool) error {
 }
 
 func (p *Program) dashboard(ctx context.Context) error {
-	ws, week, repos, err := p.repositories(ctx)
+	if !isTerminal() {
+		return p.status(ctx, false)
+	}
+	snapshot, err := p.snapshot(ctx)
 	if err != nil {
 		return err
 	}
+	return ui.Run(snapshot, func() (ui.Snapshot, error) { return p.snapshot(ctx) }, func(name string) error { return p.mutate([]string{"done", name}) })
+}
+
+func (p *Program) snapshot(ctx context.Context) (ui.Snapshot, error) {
+	ws, week, repos, err := p.repositories(ctx)
+	if err != nil {
+		return ui.Snapshot{}, err
+	}
+	entries := assignmentsByID(week)
 	assigned := p.assigned(week, repos)
-	p.printDashboard(ws, week, assigned)
-	if !isTerminal() {
-		return nil
+	rows := make([]ui.Repo, 0, len(assigned))
+	for _, repo := range assigned {
+		rows = append(rows, ui.Repo{Name: repo.Name, Branch: repo.Branch, YourCommits: repo.YourCommits, Dirty: repo.Dirty, Done: entries[repo.ID].Done})
 	}
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Fprint(p.out, "mds [a add, d drop, space done, r refresh, q quit] > ")
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return nil
-		}
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) == 0 {
-			continue
-		}
-		if fields[0] == "q" {
-			return nil
-		}
-		if fields[0] == "r" {
-			return p.dashboard(ctx)
-		}
-		if fields[0] == "a" || fields[0] == "d" || fields[0] == "done" {
-			if len(fields) < 2 {
-				fmt.Fprintln(p.err, "provide a repo name")
-				continue
-			}
-			cmd := map[string]string{"a": "add", "d": "remove", "done": "done"}[fields[0]]
-			if err := p.mutate(append([]string{cmd}, fields[1:]...)); err != nil {
-				fmt.Fprintln(p.err, err)
-			}
-			continue
-		}
-		fmt.Fprintln(p.err, "unknown command")
-	}
+	return ui.Snapshot{Workspace: ws.Name, Week: week.Name, Deadline: week.Deadline, Repos: rows}, nil
 }
 
 func (p *Program) assigned(week model.Week, repos []model.Repo) []model.Repo {
