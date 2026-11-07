@@ -27,9 +27,9 @@ type Repo struct {
 	Dirty, Done, Assigned, RemoteOnly   bool
 }
 type Snapshot struct {
-	Workspace, Week, GitHubHost, GitHubState string
-	Deadline                                 *time.Time
-	Repos                                    []Repo
+	Workspace, Week, GitHubHost, GitHubUser, GitHubState string
+	Deadline                                             *time.Time
+	Repos                                                []Repo
 }
 type refreshMsg struct {
 	snapshot Snapshot
@@ -244,9 +244,7 @@ func (m model) View() string {
 	}
 	b.WriteString(strings.Repeat("─", max(40, m.width-2)) + "\n")
 	b.WriteString(muted.Render("b browse · / search · a add · d remove · space done · c clone · enter open · l detail · r refresh · q quit"))
-	if m.snapshot.GitHubState != "ok" {
-		b.WriteString("\n" + muted.Render("GitHub "+m.snapshot.GitHubHost+": "+m.snapshot.GitHubState))
-	}
+	b.WriteString("\n" + muted.Render("GitHub: "+m.snapshot.GitHubUser+" @ "+m.snapshot.GitHubHost+" · "+m.snapshot.GitHubState))
 	if m.err != nil {
 		b.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
 	}

@@ -6,20 +6,25 @@
 
 ```bash
 go install ./cmd/mds
-mds setup MDS ~/Documents/MDS you@student.ubc.ca "Your Name"
+mds setup MDS ~/Documents/MDS you@student.ubc.ca "Your Name" github.com your-github-username
 mds
 ```
 
 To use an enterprise host such as UBC GitHub, pass it as the final setup argument:
 
 ```bash
-mds setup MDS ~/Documents/MDS you@student.ubc.ca "Your Name" github.ubc.ca
+mds setup MDS ~/Documents/MDS you@student.ubc.ca "Your Name" github.ubc.ca your-github-username
 ```
 
 Inside the dashboard, press `b` to browse discovered local repositories and
 repositories available through the configured GitHub host. Use `a` to add a
 repository to the current week, `d` to remove it, `Space` to mark it done,
 `c` to clone a remote repository, and `Enter` to open a local working copy.
+
+The GitHub email used for commit attribution and the GitHub account used for
+remote access are separate values. `mds` stores the explicit GitHub username
+and runs remote commands with that account's `gh auth token`; it never falls
+back to whichever account happens to be active in `gh`.
 
 The dashboard is intentionally read-only with respect to git history: it never stages, commits, rebases, or modifies a repository.
 

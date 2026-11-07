@@ -92,7 +92,11 @@ func (p *Program) setup(args []string) error {
 	if len(args) > 4 && strings.TrimSpace(args[4]) != "" {
 		host = strings.TrimSpace(args[4])
 	}
-	gh := model.GitHub{Host: host, State: gh.State(context.Background(), host)}
+	githubUser := strings.Split(args[2], "@")[0]
+	if len(args) > 5 && strings.TrimSpace(args[5]) != "" {
+		githubUser = strings.TrimSpace(args[5])
+	}
+	gh := model.GitHub{Host: host, User: githubUser, State: gh.State(context.Background(), host, githubUser)}
 	p.state.Workspaces[id] = model.Workspace{ID: id, Name: name, Root: root, User: model.Identity{Name: gitName, Email: args[2]}, GitHub: gh, CreatedAt: time.Now()}
 	p.state.ActiveWorkspace = id
 	store.EnsureWeek(&p.state, id, time.Now())
@@ -192,13 +196,14 @@ func (p *Program) snapshot(ctx context.Context) (ui.Snapshot, error) {
 	if err != nil {
 		return ui.Snapshot{}, err
 	}
+	ws.GitHub.State = gh.State(ctx, ws.GitHub.Host, ws.GitHub.User)
 	entries := assignmentsByID(week)
 	rows := make([]ui.Repo, 0, len(repos))
 	for _, repo := range repos {
 		_, assigned := entries[repo.ID]
 		rows = append(rows, ui.Repo{ID: repo.ID, Name: repo.Name, Path: repo.Path, Remote: repo.Remote, Branch: repo.Branch, YourCommits: repo.YourCommits, Dirty: repo.Dirty, Done: entries[repo.ID].Done, Assigned: assigned})
 	}
-	remote, remoteErr := gh.MyRepos(ctx, ws.GitHub.Host)
+	remote, remoteErr := gh.MyRepos(ctx, ws.GitHub.Host, ws.GitHub.User)
 	if remoteErr == nil {
 		for _, repo := range remote {
 			_, assigned := entries["remote:"+repo.FullName]
@@ -217,7 +222,7 @@ func (p *Program) snapshot(ctx context.Context) (ui.Snapshot, error) {
 			rows = append(rows, ui.Repo{ID: entry.RepoID, Name: entry.Name, Path: entry.Path, Remote: entry.Remote, Assigned: true, Done: entry.Done, RemoteOnly: entry.Path == ""})
 		}
 	}
-	return ui.Snapshot{Workspace: ws.Name, Week: week.Name, Deadline: week.Deadline, Repos: rows, GitHubHost: ws.GitHub.Host, GitHubState: ws.GitHub.State}, nil
+	return ui.Snapshot{Workspace: ws.Name, Week: week.Name, Deadline: week.Deadline, Repos: rows, GitHubHost: ws.GitHub.Host, GitHubUser: ws.GitHub.User, GitHubState: ws.GitHub.State}, nil
 }
 
 func (p *Program) applyUIAction(action ui.Action, repo ui.Repo) error {
@@ -233,7 +238,7 @@ func (p *Program) applyUIAction(action ui.Action, repo ui.Repo) error {
 		if _, err := os.Stat(destination); err == nil {
 			return fmt.Errorf("%s already exists", destination)
 		}
-		return gh.Clone(context.Background(), ws.GitHub.Host, repo.Remote, destination)
+		return gh.Clone(context.Background(), ws.GitHub.Host, ws.GitHub.User, repo.Remote, destination)
 	}
 	index := -1
 	for i, entry := range week.Entries {
@@ -475,7 +480,11 @@ func (p *Program) auth(args []string) error {
 			host = workspace.GitHub.Host
 		}
 	}
-	state := gh.State(context.Background(), host)
+	user := ""
+	if p.state.ActiveWorkspace != "" {
+		user = p.state.Workspaces[p.state.ActiveWorkspace].GitHub.User
+	}
+	state := gh.State(context.Background(), host, user)
 	if contains(args, "--json") {
 		return json.NewEncoder(p.out).Encode(map[string]string{"state": state, "host": host})
 	}
@@ -486,7 +495,7 @@ func (p *Program) auth(args []string) error {
 	return nil
 }
 func (p *Program) help() {
-	fmt.Fprint(p.out, "mds — MDS repository tracker\n\nCommands:\n  mds setup <name> <root> <email> [git-name] [github-host]\n  mds [dashboard]\n  mds status [--json]\n  mds scan [--json]\n  mds add|remove|done <repo>\n  mds week name <name>\n  mds week due <YYYY-MM-DD [HH:MM]|none>\n  mds workspace list|use <name>\n  mds auth [--json]\n")
+	fmt.Fprint(p.out, "mds — MDS repository tracker\n\nCommands:\n  mds setup <name> <root> <email> [git-name] [github-host] [github-user]\n  mds [dashboard]\n  mds status [--json]\n  mds scan [--json]\n  mds add|remove|done <repo>\n  mds week name <name>\n  mds week due <YYYY-MM-DD [HH:MM]|none>\n  mds workspace list|use <name>\n  mds auth [--json]\n")
 }
 func contains(values []string, wanted string) bool {
 	for _, v := range values {
