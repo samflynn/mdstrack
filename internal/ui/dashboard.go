@@ -50,6 +50,7 @@ type model struct {
 	selected, width int
 	current         view
 	query           string
+	searchEditing   bool
 	err             error
 	refresh         func() (Snapshot, error)
 	action          func(Action, Repo) error
@@ -83,10 +84,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key == "esc" {
 			m.current = dashboard
 			m.query = ""
+			m.searchEditing = false
 			m.selected = 0
 			return m, nil
 		}
-		if m.current == search && !searchCommand(key) {
+		if m.current == search && key == "/" {
+			m.searchEditing = !m.searchEditing
+			return m, nil
+		}
+		if m.current == search && m.searchEditing {
 			if key == "backspace" {
 				if len(m.query) > 0 {
 					m.query = m.query[:len(m.query)-1]
@@ -116,6 +122,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selected = 0
 		case "/":
 			m.current = search
+			m.searchEditing = true
 			m.selected = 0
 		case "l", "right":
 			if len(m.rows()) > 0 {
@@ -187,7 +194,11 @@ func (m model) View() string {
 		title = "Detail"
 	}
 	if m.current == search {
-		title = "Search: " + m.query
+		mode := "results"
+		if m.searchEditing {
+			mode = "typing"
+		}
+		title = "Search (" + mode + "): " + m.query
 	}
 	deadline := "no deadline"
 	if m.snapshot.Deadline != nil {
@@ -243,7 +254,11 @@ func (m model) View() string {
 		b.WriteString(muted.Render(fmt.Sprintf("✓ %d done · b browse to reopen", done)) + "\n")
 	}
 	b.WriteString(strings.Repeat("─", max(40, m.width-2)) + "\n")
-	b.WriteString(muted.Render("b browse · / search · a add · d remove · space done · c clone · enter open · l detail · r refresh · q quit"))
+	help := "b browse · / search · a add · d remove · space done · c clone · enter open · l detail · r refresh · q quit"
+	if m.current == search && m.searchEditing {
+		help = "type to filter · / select results · Esc cancel"
+	}
+	b.WriteString(muted.Render(help))
 	b.WriteString("\n" + muted.Render("GitHub: "+m.snapshot.GitHubUser+" @ "+m.snapshot.GitHubHost+" · "+m.snapshot.GitHubState))
 	if m.err != nil {
 		b.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
@@ -277,13 +292,4 @@ func max(a, b int) int {
 		return a
 	}
 	return b
-}
-
-func searchCommand(key string) bool {
-	switch key {
-	case "up", "down", "k", "j", "a", "d", " ", "c", "enter", "l", "right", "r", "b", "/", "esc", "q", "ctrl+c":
-		return true
-	default:
-		return false
-	}
 }
