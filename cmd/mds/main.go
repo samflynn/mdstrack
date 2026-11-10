@@ -77,7 +77,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" {
+		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.path == "") {
 			return m, tea.Quit
 		}
 		if m.mode == repositoriesMode {
@@ -171,11 +171,8 @@ func (m model) repositoriesView() string {
 func (m model) fullScreen(content string) string {
 	width := max(40, m.width)
 	height := max(12, m.height)
-	panelWidth := min(92, width-6)
-	panel := borderStyle.Width(panelWidth - 6).Render(content)
-	topPadding := max(1, (height-lipgloss.Height(panel))/3)
-	leftPadding := max(2, (width-lipgloss.Width(panel))/2)
-	return strings.Repeat("\n", topPadding) + strings.Repeat(" ", leftPadding) + panel + "\n"
+	panel := borderStyle.Width(width - 6).Height(height - 4).Render(content)
+	return "\n" + lipgloss.NewStyle().PaddingLeft(2).Render(panel) + "\n"
 }
 
 func findRepositories(root string) ([]string, error) {
@@ -242,13 +239,6 @@ func saveFolder(folder string) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o600)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func max(a, b int) int {
