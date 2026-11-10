@@ -48,46 +48,82 @@ func (m model) View() string {
 }
 
 var (
-	brand      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
-	kicker     = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)
-	title      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255"))
-	muted      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	key        = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-	searchCard = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(1, 2)
-	dimCard    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
+	canvas = lipgloss.Color("235")
+	panel  = lipgloss.Color("236")
+	border = lipgloss.Color("240")
+	ink    = lipgloss.Color("255")
+	muted  = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	plum   = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
+	cyan   = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
+	green  = lipgloss.NewStyle().Foreground(lipgloss.Color("78"))
+	amber  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	key    = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Background(lipgloss.Color("238")).Padding(0, 1).Bold(true)
+	pane   = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(border).Background(panel).Padding(1, 1)
 )
 
 func (m model) dashboardView() string {
 	width := m.contentWidth()
-	line := muted.Render(strings.Repeat("─", width))
-	header := lipgloss.JoinHorizontal(lipgloss.Top, brand.Render("mds"), muted.Render("  ·  your work, quietly organized"))
-	search := searchCard.Width(width - 6).Render(key.Render("/") + "  " + title.Render("Search") + "\n" + muted.Render("Find a repository, assignment, or anything else when you are ready."))
-	status := dimCard.Width(width - 6).Render(kicker.Render("VERSION 0.01") + "\n" + title.Render("A calm place to begin.") + "\n" + muted.Render("Your dashboard will grow here, one useful thing at a time."))
-	content := strings.Join([]string{header, "", line, "", search, "", status}, "\n")
-	return m.frame(content, key.Render("/")+muted.Render(" open search"))
+	header := lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(
+		lipgloss.NewStyle().Bold(true).Foreground(ink).Render("M D S T R A C K")) + "\n" +
+		lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Foreground(lipgloss.Color("78")).Render("mds · Terminal Workspace Tracker")
+
+	sidebar := pane.Width(23).Render(
+		cyan.Bold(true).Render("WEATHER [YVR]") + "\n" +
+			cyan.Render("  \\  /       11°C") + "\n" +
+			green.Render("_ /\"\\_      Light rain & sun") + "\n" +
+			muted.Render("  /  \\      feels 9°C · wind 14km/h") + "\n\n" +
+			muted.Render("──────────────────────") + "\n" +
+			plum.Render("TODAY · MON NOV 3") + "\n" +
+			cyan.Render("09:30 - 11:00") + "\nDSCI 571 Lecture\n" +
+			muted.Render("12:00 - 13:00") + "\nTA Office Hours\n" +
+			green.Render("14:00 - 16:30") + "\nWork: lootbox-infinite\n" +
+			amber.Render("23:59 [DUE]") + "\nDSCI-571 Quiz 2\n\n" +
+			green.Render("● READY_WAIT_EVENT"))
+
+	mainWidth := max(42, width-27)
+	toolbar := plum.Render("▣") + " " + key.Render("TTY: 52 × 24") + "  " + green.Render("● 12s auto-refresh") + "\n" +
+		muted.Render("Workspace: ~/Documents/MDS   git: smudgal@student.ubc.ca   gh: ✓ authenticated")
+	week := lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(ink).Padding(0, 1).Width(mainWidth - 4).Render(
+		green.Render("❯") + " MDS · Week 5 — Unsupervised Learning" + "  " + amber.Render("due Sun Nov 8 23:59 [3d left]"))
+	rows := strings.Join([]string{
+		cyan.Render("  lootbox-infinite") + "    " + muted.Render("feat/rarity-tiers · 2h ago") + "  " + green.Render("███ 3/3"),
+		lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(ink).Padding(0, 1).Render("▸ yt-cli-go             main · 1d ago · ● dirty · ↑1    ") + cyan.Render("██░ 2/3"),
+		cyan.Render("  eink-calendar-app") + "   " + muted.Render("main · 4d ago · ↑2") + "           " + muted.Render("░░░ 0/3"),
+		cyan.Render("  DSCI-571") + "           " + muted.Render("main · 2h ago · (primary clone)") + "  " + cyan.Render("██░ 2/3"),
+		cyan.Render("  DSCI-571 (retry)") + "   " + muted.Render("main · 6d ago · (alternate path)") + " " + muted.Render("░░░ 0/3"),
+	}, "\n")
+	workspace := pane.Width(mainWidth).Render(toolbar + "\n\n" + week + "\n\n" + plum.Render("TRACKED REPOSITORIES (3/WEEK GOAL)") + "\n" + rows + "\n\n" +
+		green.Render("✓ 2 done this week") + muted.Render("  (press x to toggle)") + "\n" + muted.Render("  ✓ building-diorama                         3/3\n  ✓ stat-545-hw3                            0/3") + "\n\n" +
+		inkStyle("3/7 targets met") + muted.Render(" · ") + cyan.Render("10 commits logged"))
+	content := header + "\n" + lipgloss.JoinHorizontal(lipgloss.Top, sidebar, " ", workspace)
+	footer := key.Render("q") + muted.Render(" quit  ") + key.Render("tab") + muted.Render(" cycle  ") + key.Render("/") + muted.Render(" fuzzy search")
+	return m.frame(content, footer)
 }
 
 func (m model) searchView() string {
 	width := m.contentWidth()
-	header := lipgloss.JoinHorizontal(lipgloss.Top, brand.Render("mds"), muted.Render("  ·  search"))
-	blank := dimCard.Width(width - 6).Render(kicker.Render("SEARCH") + "\n" + title.Render("Nothing here yet.") + "\n" + muted.Render("This page is intentionally blank in v0.01."))
-	return m.frame(header+"\n\n"+blank, key.Render("Esc")+muted.Render(" dashboard"))
+	blank := pane.Width(width).Render(plum.Render("┌─ SEARCH ───────────────────────────┐") + "\n\n" + inkStyle("Nothing here yet.") + "\n" + muted.Render("This page is intentionally blank in v0.01."))
+	return m.frame(blank, key.Render("Esc")+muted.Render(" dashboard"))
 }
 
 func (m model) frame(content, footer string) string {
 	if m.height == 0 {
 		return content + "\n"
 	}
-	padding := max(1, (m.height-lipgloss.Height(content)-2)/2)
-	left := max(2, (m.width-m.contentWidth())/2)
-	return strings.Repeat("\n", padding) + lipgloss.NewStyle().PaddingLeft(left).Render(content) + "\n\n" + muted.Render(footer) + "\n"
+	padding := max(0, (m.height-lipgloss.Height(content)-2)/2)
+	left := max(1, (m.width-m.contentWidth())/2)
+	return strings.Repeat("\n", padding) + lipgloss.NewStyle().Background(canvas).PaddingLeft(left).Render(content) + "\n" + muted.Render(footer) + "\n"
 }
 
 func (m model) contentWidth() int {
 	if m.width <= 0 {
-		return 64
+		return 92
 	}
-	return min(72, max(36, m.width-8))
+	return min(108, max(52, m.width-4))
+}
+
+func inkStyle(value string) string {
+	return lipgloss.NewStyle().Foreground(ink).Bold(true).Render(value)
 }
 
 func min(a, b int) int {
