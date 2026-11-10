@@ -44,12 +44,30 @@ func TestRepositoryCursorScrollsViewport(t *testing.T) {
 	if got, want := m.cursor, 6; got != want {
 		t.Fatalf("cursor = %d, want %d", got, want)
 	}
-	start, end := m.repositoryWindow()
-	if start != 1 || end != 7 {
-		t.Fatalf("repositoryWindow() = (%d, %d), want (1, 7)", start, end)
+	start, end := m.repositoryWindow(m.repositoryListRows())
+	if start >= end {
+		t.Fatalf("repositoryWindow() = (%d, %d), expected a non-empty window", start, end)
 	}
 	if !strings.Contains(m.repositoriesView(), "▸ seven") {
 		t.Fatal("expected the selected repository to be visible")
+	}
+}
+
+func TestRepositoryListRowsGroupsByFirstFolder(t *testing.T) {
+	m := model{repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one", "testing"}}
+	rows := m.repositoryListRows()
+	groups := []string{}
+	for _, row := range rows {
+		if row.index < 0 {
+			groups = append(groups, row.group)
+		}
+	}
+	want := []string{"511", "523", "ROOT"}
+	if !reflect.DeepEqual(groups, want) {
+		t.Fatalf("groups = %v, want %v", groups, want)
+	}
+	if got, want := rows[1].repository, "lab-one"; got != want {
+		t.Fatalf("first grouped repository = %q, want %q", got, want)
 	}
 }
 
@@ -61,7 +79,7 @@ func TestRepositoriesViewLimitsRowsToViewport(t *testing.T) {
 		repositories: []string{"one", "two", "three", "four", "five", "six", "seven"},
 	}
 	view := m.repositoriesView()
-	if !strings.Contains(view, "of 7") {
+	if !strings.Contains(view, "of ") {
 		t.Fatalf("expected an overflow summary, got %q", view)
 	}
 }

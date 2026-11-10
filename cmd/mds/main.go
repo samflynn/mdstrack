@@ -26,6 +26,12 @@ const (
 	repositoriesMode
 )
 
+type repositoryListRow struct {
+	group      string
+	repository string
+	index      int
+}
+
 type model struct {
 	mode         mode
 	path         string
@@ -43,6 +49,7 @@ var (
 	borderStyle   = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
 	promptStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
+	groupStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
 	cursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
 )
 
@@ -176,17 +183,22 @@ func (m model) repositoriesView() string {
 	} else if len(m.repositories) == 0 {
 		lines = append(lines, mutedStyle.Render("No Git repositories found in this folder."))
 	} else {
-		start, end := m.repositoryWindow()
-		for index := start; index < end; index++ {
-			row := truncate(m.repositories[index], max(1, width-3))
-			if index == m.cursor {
-				lines = append(lines, cursorStyle.Render("▸ "+row))
+		rows := m.repositoryListRows()
+		start, end := m.repositoryWindow(rows)
+		for _, row := range rows[start:end] {
+			if row.index < 0 {
+				lines = append(lines, groupStyle.Render("[ "+truncate(row.group, width-4)+" ]"))
 				continue
 			}
-			lines = append(lines, selectedStyle.Render("• ")+row)
+			name := truncate(row.repository, max(1, width-3))
+			if row.index == m.cursor {
+				lines = append(lines, cursorStyle.Render("▸ "+name))
+				continue
+			}
+			lines = append(lines, selectedStyle.Render("• ")+name)
 		}
-		if start > 0 || end < len(m.repositories) {
-			lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", start+1, end, len(m.repositories))))
+		if start > 0 || end < len(rows) {
+			lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", start+1, end, len(rows))))
 		}
 	}
 	footer := fmt.Sprintf("%d repositories · ↑/↓ scroll · q to quit", len(m.repositories))
@@ -194,15 +206,43 @@ func (m model) repositoriesView() string {
 	return m.fullScreen(lines)
 }
 
-func (m model) repositoryWindow() (int, int) {
+func (m model) repositoryListRows() []repositoryListRow {
+	rows := make([]repositoryListRow, 0, len(m.repositories))
+	previousGroup := ""
+	for index, repository := range m.repositories {
+		group, name := repositoryGroup(repository)
+		if group != previousGroup {
+			rows = append(rows, repositoryListRow{group: group, index: -1})
+			previousGroup = group
+		}
+		rows = append(rows, repositoryListRow{repository: name, index: index})
+	}
+	return rows
+}
+
+func (m model) repositoryWindow(rows []repositoryListRow) (int, int) {
 	visible := max(1, m.contentHeight()-6)
-	cursor := min(max(0, m.cursor), max(0, len(m.repositories)-1))
-	start := max(0, cursor-visible+1)
-	end := min(len(m.repositories), start+visible)
+	cursorRow := 0
+	for index, row := range rows {
+		if row.index == m.cursor {
+			cursorRow = index
+			break
+		}
+	}
+	start := max(0, cursorRow-visible+1)
+	end := min(len(rows), start+visible)
 	if end-start < visible {
 		start = max(0, end-visible)
 	}
 	return start, end
+}
+
+func repositoryGroup(repository string) (string, string) {
+	parts := strings.Split(filepath.ToSlash(repository), "/")
+	if len(parts) == 1 {
+		return "ROOT", parts[0]
+	}
+	return parts[0], strings.Join(parts[1:], "/")
 }
 
 func (m model) fullScreen(lines []string) string {
