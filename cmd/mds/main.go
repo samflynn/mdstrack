@@ -16,7 +16,8 @@ import (
 const applicationName = "mds"
 
 type config struct {
-	MDSFolder string `json:"mds_folder"`
+	MDSFolder string          `json:"mds_folder"`
+	Favorites map[string]bool `json:"favorites"`
 }
 
 type mode int
@@ -36,7 +37,7 @@ type model struct {
 	mode         mode
 	path         string
 	repositories []string
-	completed    map[string]bool
+	favorites    map[string]bool
 	cursor       int
 	err          error
 	width        int
@@ -68,7 +69,7 @@ func main() {
 }
 
 func newModel() (model, error) {
-	folder, err := loadFolder()
+	stored, err := loadConfig()
 	if errors.Is(err, os.ErrNotExist) {
 		return model{mode: setupMode}, nil
 	}
@@ -76,8 +77,8 @@ func newModel() (model, error) {
 		return model{}, fmt.Errorf("load mds configuration: %w", err)
 	}
 
-	repositories, err := findRepositories(folder)
-	return model{mode: repositoriesMode, path: folder, repositories: repositories, completed: make(map[string]bool), err: err}, nil
+	repositories, err := findRepositories(stored.MDSFolder)
+	return model{mode: repositoriesMode, path: stored.MDSFolder, repositories: repositories, favorites: stored.Favorites, err: err}, nil
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -98,11 +99,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = min(max(0, len(m.repositories)-1), m.cursor+1)
 			case "enter":
 				if len(m.repositories) > 0 {
-					if m.completed == nil {
-						m.completed = make(map[string]bool)
+					if m.favorites == nil {
+						m.favorites = make(map[string]bool)
 					}
 					repository := m.repositories[m.cursor]
-					m.completed[repository] = !m.completed[repository]
+					m.favorites[repository] = !m.favorites[repository]
+					if err := saveConfig(config{MDSFolder: m.path, Favorites: m.favorites}); err != nil {
+						m.favorites[repository] = !m.favorites[repository]
+						m.err = fmt.Errorf("save favorites: %w", err)
+					}
 				}
 			}
 			return m, nil
@@ -146,12 +151,12 @@ func (m model) saveSetup() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if err := saveFolder(absoluteFolder); err != nil {
+	if err := saveConfig(config{MDSFolder: absoluteFolder, Favorites: make(map[string]bool)}); err != nil {
 		m.err = fmt.Errorf("save configuration: %w", err)
 		return m, nil
 	}
 	repositories, err := findRepositories(absoluteFolder)
-	m.mode, m.path, m.repositories, m.completed, m.err = repositoriesMode, absoluteFolder, repositories, make(map[string]bool), err
+	m.mode, m.path, m.repositories, m.favorites, m.err = repositoriesMode, absoluteFolder, repositories, make(map[string]bool), err
 	return m, nil
 }
 
@@ -201,7 +206,7 @@ func (m model) repositoriesView() string {
 			}
 			name := truncate(row.repository, max(1, width-5))
 			marker := "[ ]"
-			if m.completed[m.repositories[row.index]] {
+			if m.favorites[m.repositories[row.index]] {
 				marker = "[X]"
 			}
 			if row.index == m.cursor {
@@ -214,16 +219,34 @@ func (m model) repositoriesView() string {
 			lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", start+1, end, len(rows))))
 		}
 	}
-	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter toggle · q quit", len(m.repositories))
+	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter favorite · q quit", len(m.repositories))
 	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
 }
 
 func (m model) repositoryListRows() []repositoryListRow {
-	rows := make([]repositoryListRow, 0, len(m.repositories))
-	previousGroup := ""
+	favorites := make([]int, 0, len(m.repositories))
+	regular := make([]int, 0, len(m.repositories))
 	for index, repository := range m.repositories {
-		group, name := repositoryGroup(repository)
+		if m.favorites[repository] {
+			favorites = append(favorites, index)
+			continue
+		}
+		regular = append(regular, index)
+	}
+
+	rows := make([]repositoryListRow, 0, len(m.repositories)+len(favorites)+2)
+	if len(favorites) > 0 {
+		rows = append(rows, repositoryListRow{group: "FAVORITES", index: -1})
+		rows = appendGroupedRepositoryRows(rows, m.repositories, favorites)
+	}
+	return appendGroupedRepositoryRows(rows, m.repositories, regular)
+}
+
+func appendGroupedRepositoryRows(rows []repositoryListRow, repositories []string, indexes []int) []repositoryListRow {
+	previousGroup := ""
+	for _, index := range indexes {
+		group, name := repositoryGroup(repositories[index])
 		if group != previousGroup {
 			rows = append(rows, repositoryListRow{group: group, index: -1})
 			previousGroup = group
@@ -342,26 +365,29 @@ func configPath() (string, error) {
 	return filepath.Join(directory, applicationName, "config.json"), nil
 }
 
-func loadFolder() (string, error) {
+func loadConfig() (config, error) {
 	path, err := configPath()
 	if err != nil {
-		return "", err
+		return config{}, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return config{}, err
 	}
 	var stored config
 	if err := json.Unmarshal(data, &stored); err != nil {
-		return "", err
+		return config{}, err
 	}
 	if stored.MDSFolder == "" {
-		return "", errors.New("configuration has no MDS folder")
+		return config{}, errors.New("configuration has no MDS folder")
 	}
-	return stored.MDSFolder, nil
+	if stored.Favorites == nil {
+		stored.Favorites = make(map[string]bool)
+	}
+	return stored, nil
 }
 
-func saveFolder(folder string) error {
+func saveConfig(stored config) error {
 	path, err := configPath()
 	if err != nil {
 		return err
@@ -369,7 +395,7 @@ func saveFolder(folder string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	data, err := json.Marshal(config{MDSFolder: folder})
+	data, err := json.Marshal(stored)
 	if err != nil {
 		return err
 	}

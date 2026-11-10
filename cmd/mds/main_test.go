@@ -31,12 +31,13 @@ func TestTruncateForTerminalWidth(t *testing.T) {
 }
 
 func TestEnterTogglesRepositoryCheckbox(t *testing.T) {
-	m := model{mode: repositoriesMode, repositories: []string{"511/lab-one"}}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := model{mode: repositoriesMode, path: "/tmp/mds", repositories: []string{"511/lab-one"}}
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
-	if !m.completed["511/lab-one"] {
-		t.Fatal("expected Enter to mark the selected repository complete")
+	if !m.favorites["511/lab-one"] {
+		t.Fatal("expected Enter to mark the selected repository as a favorite")
 	}
 	if !strings.Contains(m.repositoriesView(), "[X]") {
 		t.Fatal("expected a checked marker in the repository view")
@@ -44,8 +45,23 @@ func TestEnterTogglesRepositoryCheckbox(t *testing.T) {
 
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
-	if m.completed["511/lab-one"] {
-		t.Fatal("expected a second Enter to clear the selected repository")
+	if m.favorites["511/lab-one"] {
+		t.Fatal("expected a second Enter to clear the selected favorite")
+	}
+}
+
+func TestFavoritePersistence(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	want := config{MDSFolder: "/tmp/mds", Favorites: map[string]bool{"511/lab-one": true}}
+	if err := saveConfig(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("loadConfig() = %#v, want %#v", got, want)
 	}
 }
 
@@ -69,6 +85,26 @@ func TestRepositoryCursorScrollsViewport(t *testing.T) {
 	}
 	if !strings.Contains(m.repositoriesView(), "▸ [ ] seven") {
 		t.Fatal("expected the selected repository to be visible")
+	}
+}
+
+func TestFavoriteRepositoriesArePinnedAndGrouped(t *testing.T) {
+	m := model{
+		repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one"},
+		favorites:    map[string]bool{"511/lab-one": true, "511/lab-two": true},
+	}
+	rows := m.repositoryListRows()
+	if got, want := rows[0].group, "FAVORITES"; got != want {
+		t.Fatalf("first group = %q, want %q", got, want)
+	}
+	if got, want := rows[1].group, "511"; got != want {
+		t.Fatalf("favorite group = %q, want %q", got, want)
+	}
+	if got, want := rows[2].repository, "lab-one"; got != want {
+		t.Fatalf("first favorite = %q, want %q", got, want)
+	}
+	if got, want := rows[3].repository, "lab-two"; got != want {
+		t.Fatalf("second favorite = %q, want %q", got, want)
 	}
 }
 
