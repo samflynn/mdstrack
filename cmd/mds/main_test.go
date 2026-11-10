@@ -30,6 +30,29 @@ func TestTruncateForTerminalWidth(t *testing.T) {
 	}
 }
 
+func TestRepositoryCursorScrollsViewport(t *testing.T) {
+	m := model{
+		mode:         repositoriesMode,
+		width:        60,
+		height:       18,
+		repositories: []string{"one", "two", "three", "four", "five", "six", "seven"},
+	}
+	for range 6 {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(model)
+	}
+	if got, want := m.cursor, 6; got != want {
+		t.Fatalf("cursor = %d, want %d", got, want)
+	}
+	start, end := m.repositoryWindow()
+	if start != 1 || end != 7 {
+		t.Fatalf("repositoryWindow() = (%d, %d), want (1, 7)", start, end)
+	}
+	if !strings.Contains(m.repositoriesView(), "▸ seven") {
+		t.Fatal("expected the selected repository to be visible")
+	}
+}
+
 func TestRepositoriesViewLimitsRowsToViewport(t *testing.T) {
 	m := model{
 		mode:         repositoriesMode,
@@ -38,7 +61,7 @@ func TestRepositoriesViewLimitsRowsToViewport(t *testing.T) {
 		repositories: []string{"one", "two", "three", "four", "five", "six", "seven"},
 	}
 	view := m.repositoriesView()
-	if !strings.Contains(view, "more repositories") {
+	if !strings.Contains(view, "of 7") {
 		t.Fatalf("expected an overflow summary, got %q", view)
 	}
 }

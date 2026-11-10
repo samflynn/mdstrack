@@ -30,6 +30,7 @@ type model struct {
 	mode         mode
 	path         string
 	repositories []string
+	cursor       int
 	err          error
 	width        int
 	height       int
@@ -42,6 +43,7 @@ var (
 	borderStyle   = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
 	promptStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
+	cursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("238"))
 )
 
 func main() {
@@ -81,6 +83,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		if m.mode == repositoriesMode {
+			switch msg.String() {
+			case "up", "k":
+				m.cursor = max(0, m.cursor-1)
+			case "down", "j":
+				m.cursor = min(max(0, len(m.repositories)-1), m.cursor+1)
+			}
 			return m, nil
 		}
 
@@ -168,17 +176,33 @@ func (m model) repositoriesView() string {
 	} else if len(m.repositories) == 0 {
 		lines = append(lines, mutedStyle.Render("No Git repositories found in this folder."))
 	} else {
-		availableRows := max(1, m.contentHeight()-6)
-		visible := min(len(m.repositories), availableRows)
-		for _, repository := range m.repositories[:visible] {
-			lines = append(lines, selectedStyle.Render("• ")+truncate(repository, max(1, width-2)))
+		start, end := m.repositoryWindow()
+		for index := start; index < end; index++ {
+			row := truncate(m.repositories[index], max(1, width-3))
+			if index == m.cursor {
+				lines = append(lines, cursorStyle.Width(width).Render("▸ "+row))
+				continue
+			}
+			lines = append(lines, selectedStyle.Render("• ")+row)
 		}
-		if remaining := len(m.repositories) - visible; remaining > 0 {
-			lines = append(lines, mutedStyle.Render(fmt.Sprintf("… %d more repositories", remaining)))
+		if start > 0 || end < len(m.repositories) {
+			lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", start+1, end, len(m.repositories))))
 		}
 	}
-	lines = append(lines, "", mutedStyle.Render(truncate(fmt.Sprintf("%d repositories · q to quit", len(m.repositories)), width)))
+	footer := fmt.Sprintf("%d repositories · ↑/↓ scroll · q to quit", len(m.repositories))
+	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
+}
+
+func (m model) repositoryWindow() (int, int) {
+	visible := max(1, m.contentHeight()-6)
+	cursor := min(max(0, m.cursor), max(0, len(m.repositories)-1))
+	start := max(0, cursor-visible+1)
+	end := min(len(m.repositories), start+visible)
+	if end-start < visible {
+		start = max(0, end-visible)
+	}
+	return start, end
 }
 
 func (m model) fullScreen(lines []string) string {
