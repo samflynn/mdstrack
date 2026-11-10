@@ -83,18 +83,20 @@ func (m model) dashboardView() string {
 			amber.Render("23:59") + " DSCI-571 Quiz\n\n" +
 			green.Render("● READY_WAIT_EVENT")
 
-	mainWidth := max(42, width-27)
-	toolbar := plum.Render("▣") + " " + key.Render("TTY: 52 × 24") + "  " + green.Render("● 12s auto-refresh") + "\n" +
-		muted.Render("Workspace: ~/Documents/MDS   git: smudgal@student.ubc.ca   gh: ✓ authenticated")
-	week := lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(ink).Padding(0, 1).Width(mainWidth - 4).Render(
-		green.Render("❯") + " MDS · Week 5 — Unsupervised Learning" + "  " + amber.Render("due Sun Nov 8 23:59 [3d left]"))
-	rows := strings.Join([]string{
-		cyan.Render("  lootbox-infinite") + "    " + muted.Render("feat/rarity-tiers · 2h ago") + "  " + green.Render("███ 3/3"),
-		lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(ink).Padding(0, 1).Render("▸ yt-cli-go             main · 1d ago · ● dirty · ↑1    ") + cyan.Render("██░ 2/3"),
-		cyan.Render("  eink-calendar-app") + "   " + muted.Render("main · 4d ago · ↑2") + "           " + muted.Render("░░░ 0/3"),
-		cyan.Render("  DSCI-571") + "           " + muted.Render("main · 2h ago · (primary clone)") + "  " + cyan.Render("██░ 2/3"),
-		cyan.Render("  DSCI-571 (retry)") + "   " + muted.Render("main · 6d ago · (alternate path)") + " " + muted.Render("░░░ 0/3"),
-	}, "\n")
+	// Width() describes a pane's content, so reserve borders and padding before
+	// splitting the terminal horizontally.
+	sidebarOuterWidth := 23
+	mainWidth := max(34, width-sidebarOuterWidth-5)
+	compact := mainWidth < 92
+	toolbar := plum.Render("▣") + " " + key.Render("TTY: 52 × 24") + "  " + green.Render("● live") + "\n" +
+		muted.Render("~/Documents/MDS · gh: authenticated")
+	weekText := green.Render("❯") + " MDS · Week 5"
+	if !compact {
+		weekText += " — Unsupervised Learning"
+	}
+	week := lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(ink).Padding(0, 1).Width(mainWidth - 2).Render(
+		weekText + "  " + amber.Render("[3d left]"))
+	rows := compactRows(compact)
 	workspace := pane.Width(mainWidth).Render(toolbar + "\n\n" + week + "\n\n" + plum.Render("TRACKED REPOSITORIES (3/WEEK GOAL)") + "\n" + rows + "\n\n" +
 		green.Render("✓ 2 done this week") + "\n" + muted.Render("  ✓ building-diorama                         3/3\n  ✓ stat-545-hw3                            0/3") + "\n\n" +
 		inkStyle("3/7 targets met") + muted.Render(" · ") + cyan.Render("10 commits logged"))
@@ -106,7 +108,7 @@ func (m model) dashboardView() string {
 
 func (m model) searchView() string {
 	width := m.contentWidth()
-	blank := pane.Width(width).Render(plum.Render("┌─ SEARCH ───────────────────────────┐") + "\n\n" + inkStyle("Nothing here yet.") + "\n" + muted.Render("This page is intentionally blank in v0.01."))
+	blank := pane.Width(max(1, width-4)).Render(plum.Render("┌─ SEARCH ───────────────────────────┐") + "\n\n" + inkStyle("Nothing here yet.") + "\n" + muted.Render("This page is intentionally blank in v0.01."))
 	return m.frame(blank, key.Render("Esc")+muted.Render(" dashboard"))
 }
 
@@ -114,16 +116,36 @@ func (m model) frame(content, footer string) string {
 	if m.height == 0 {
 		return content + "\n"
 	}
-	padding := max(0, (m.height-lipgloss.Height(content)-2)/2)
 	left := max(1, (m.width-m.contentWidth())/2)
-	return strings.Repeat("\n", padding) + lipgloss.NewStyle().Background(canvas).PaddingLeft(left).Render(content) + "\n" + muted.Render(footer) + "\n"
+	return lipgloss.NewStyle().Background(canvas).PaddingLeft(left).Render(content) + "\n" + muted.Render(footer) + "\n"
 }
 
 func (m model) contentWidth() int {
 	if m.width <= 0 {
-		return 92
+		return 80
 	}
-	return min(108, max(52, m.width-4))
+	return min(118, max(50, m.width-2))
+}
+
+func compactRows(compact bool) string {
+	if compact {
+		return strings.Join([]string{
+			cyan.Render("  lootbox-infinite") + "  " + green.Render("███ 3/3"),
+			muted.Render("    feat/rarity-tiers · 2h ago"),
+			lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(ink).Padding(0, 1).Render("▸ yt-cli-go          ") + cyan.Render("██░ 2/3"),
+			muted.Render("    main · dirty · ↑1"),
+			cyan.Render("  eink-calendar-app") + " " + muted.Render("░░░ 0/3"),
+			cyan.Render("  DSCI-571") + "          " + cyan.Render("██░ 2/3"),
+			cyan.Render("  DSCI-571 (retry)") + "  " + muted.Render("░░░ 0/3"),
+		}, "\n")
+	}
+	return strings.Join([]string{
+		cyan.Render("  lootbox-infinite") + "    " + muted.Render("feat/rarity-tiers · 2h ago") + "  " + green.Render("███ 3/3"),
+		lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(ink).Padding(0, 1).Render("▸ yt-cli-go             main · 1d ago · ● dirty · ↑1    ") + cyan.Render("██░ 2/3"),
+		cyan.Render("  eink-calendar-app") + "   " + muted.Render("main · 4d ago · ↑2") + "           " + muted.Render("░░░ 0/3"),
+		cyan.Render("  DSCI-571") + "           " + muted.Render("main · 2h ago · (primary clone)") + "  " + cyan.Render("██░ 2/3"),
+		cyan.Render("  DSCI-571 (retry)") + "   " + muted.Render("main · 6d ago · (alternate path)") + " " + muted.Render("░░░ 0/3"),
+	}, "\n")
 }
 
 func inkStyle(value string) string {
