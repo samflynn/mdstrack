@@ -36,6 +36,7 @@ type model struct {
 	mode         mode
 	path         string
 	repositories []string
+	completed    map[string]bool
 	cursor       int
 	err          error
 	width        int
@@ -76,7 +77,7 @@ func newModel() (model, error) {
 	}
 
 	repositories, err := findRepositories(folder)
-	return model{mode: repositoriesMode, path: folder, repositories: repositories, err: err}, nil
+	return model{mode: repositoriesMode, path: folder, repositories: repositories, completed: make(map[string]bool), err: err}, nil
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -95,6 +96,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = max(0, m.cursor-1)
 			case "down", "j":
 				m.cursor = min(max(0, len(m.repositories)-1), m.cursor+1)
+			case "enter":
+				if len(m.repositories) > 0 {
+					if m.completed == nil {
+						m.completed = make(map[string]bool)
+					}
+					repository := m.repositories[m.cursor]
+					m.completed[repository] = !m.completed[repository]
+				}
 			}
 			return m, nil
 		}
@@ -142,7 +151,7 @@ func (m model) saveSetup() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	repositories, err := findRepositories(absoluteFolder)
-	m.mode, m.path, m.repositories, m.err = repositoriesMode, absoluteFolder, repositories, err
+	m.mode, m.path, m.repositories, m.completed, m.err = repositoriesMode, absoluteFolder, repositories, make(map[string]bool), err
 	return m, nil
 }
 
@@ -190,18 +199,22 @@ func (m model) repositoriesView() string {
 				lines = append(lines, groupStyle.Render("[ "+truncate(row.group, width-4)+" ]"))
 				continue
 			}
-			name := truncate(row.repository, max(1, width-3))
+			name := truncate(row.repository, max(1, width-5))
+			marker := "[ ]"
+			if m.completed[m.repositories[row.index]] {
+				marker = "[X]"
+			}
 			if row.index == m.cursor {
-				lines = append(lines, cursorStyle.Render("▸ "+name))
+				lines = append(lines, cursorStyle.Render("▸ "+marker+" "+name))
 				continue
 			}
-			lines = append(lines, selectedStyle.Render("• ")+name)
+			lines = append(lines, selectedStyle.Render(marker+" ")+name)
 		}
 		if start > 0 || end < len(rows) {
 			lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", start+1, end, len(rows))))
 		}
 	}
-	footer := fmt.Sprintf("%d repositories · ↑/↓ scroll · q to quit", len(m.repositories))
+	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter toggle · q quit", len(m.repositories))
 	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
 }

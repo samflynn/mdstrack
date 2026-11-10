@@ -30,6 +30,25 @@ func TestTruncateForTerminalWidth(t *testing.T) {
 	}
 }
 
+func TestEnterTogglesRepositoryCheckbox(t *testing.T) {
+	m := model{mode: repositoriesMode, repositories: []string{"511/lab-one"}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if !m.completed["511/lab-one"] {
+		t.Fatal("expected Enter to mark the selected repository complete")
+	}
+	if !strings.Contains(m.repositoriesView(), "[X]") {
+		t.Fatal("expected a checked marker in the repository view")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.completed["511/lab-one"] {
+		t.Fatal("expected a second Enter to clear the selected repository")
+	}
+}
+
 func TestRepositoryCursorScrollsViewport(t *testing.T) {
 	m := model{
 		mode:         repositoriesMode,
@@ -48,7 +67,7 @@ func TestRepositoryCursorScrollsViewport(t *testing.T) {
 	if start >= end {
 		t.Fatalf("repositoryWindow() = (%d, %d), expected a non-empty window", start, end)
 	}
-	if !strings.Contains(m.repositoriesView(), "▸ seven") {
+	if !strings.Contains(m.repositoriesView(), "▸ [ ] seven") {
 		t.Fatal("expected the selected repository to be visible")
 	}
 }
