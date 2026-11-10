@@ -63,22 +63,25 @@ var (
 
 func (m model) dashboardView() string {
 	width := m.contentWidth()
-	header := lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(
+	topBar := lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(
+		muted.Render("Help: Press ") + key.Render("?") + muted.Render(" or ") + key.Render("Esc") + muted.Render(" to close   │   ") + green.Render("mds · Terminal Workspace Tracker"))
+	header := topBar + "\n\n" + lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(
 		lipgloss.NewStyle().Bold(true).Foreground(ink).Render("M D S T R A C K")) + "\n" +
-		lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Foreground(lipgloss.Color("78")).Render("mds · Terminal Workspace Tracker")
+		lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Foreground(lipgloss.Color("78")).Render("Terminal Workspace Tracker")
 
-	sidebar := pane.Width(23).Render(
+	sidebarContent :=
 		cyan.Bold(true).Render("WEATHER [YVR]") + "\n" +
-			cyan.Render("  \\  /       11°C") + "\n" +
-			green.Render("_ /\"\\_      Light rain & sun") + "\n" +
-			muted.Render("  /  \\      feels 9°C · wind 14km/h") + "\n\n" +
-			muted.Render("──────────────────────") + "\n" +
+			cyan.Render("  \\  /   11°C") + "\n" +
+			green.Render("_ /\"\\_  light rain") + "\n" +
+			muted.Render("  /  \\  feels 9°") + "\n" +
+			muted.Render("wind 14 km/h") + "\n\n" +
+			muted.Render("───────────────────") + "\n" +
 			plum.Render("TODAY · MON NOV 3") + "\n" +
-			cyan.Render("09:30 - 11:00") + "\nDSCI 571 Lecture\n" +
-			muted.Render("12:00 - 13:00") + "\nTA Office Hours\n" +
-			green.Render("14:00 - 16:30") + "\nWork: lootbox-infinite\n" +
-			amber.Render("23:59 [DUE]") + "\nDSCI-571 Quiz 2\n\n" +
-			green.Render("● READY_WAIT_EVENT"))
+			cyan.Render("09:30") + " DSCI 571\n" +
+			muted.Render("12:00") + " TA Office Hours\n" +
+			green.Render("14:00") + " lootbox work\n" +
+			amber.Render("23:59") + " DSCI-571 Quiz\n\n" +
+			green.Render("● READY_WAIT_EVENT")
 
 	mainWidth := max(42, width-27)
 	toolbar := plum.Render("▣") + " " + key.Render("TTY: 52 × 24") + "  " + green.Render("● 12s auto-refresh") + "\n" +
@@ -93,10 +96,11 @@ func (m model) dashboardView() string {
 		cyan.Render("  DSCI-571 (retry)") + "   " + muted.Render("main · 6d ago · (alternate path)") + " " + muted.Render("░░░ 0/3"),
 	}, "\n")
 	workspace := pane.Width(mainWidth).Render(toolbar + "\n\n" + week + "\n\n" + plum.Render("TRACKED REPOSITORIES (3/WEEK GOAL)") + "\n" + rows + "\n\n" +
-		green.Render("✓ 2 done this week") + muted.Render("  (press x to toggle)") + "\n" + muted.Render("  ✓ building-diorama                         3/3\n  ✓ stat-545-hw3                            0/3") + "\n\n" +
+		green.Render("✓ 2 done this week") + "\n" + muted.Render("  ✓ building-diorama                         3/3\n  ✓ stat-545-hw3                            0/3") + "\n\n" +
 		inkStyle("3/7 targets met") + muted.Render(" · ") + cyan.Render("10 commits logged"))
+	sidebar := pane.Width(23).Height(max(1, lipgloss.Height(workspace)-2)).Render(sidebarContent)
 	content := header + "\n" + lipgloss.JoinHorizontal(lipgloss.Top, sidebar, " ", workspace)
-	footer := key.Render("q") + muted.Render(" quit  ") + key.Render("tab") + muted.Render(" cycle  ") + key.Render("/") + muted.Render(" fuzzy search")
+	footer := plum.Render("mds:~$ ") + key.Render("q") + muted.Render(" quit  ") + key.Render("/") + muted.Render(" fuzzy search")
 	return m.frame(content, footer)
 }
 
