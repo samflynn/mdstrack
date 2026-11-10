@@ -77,13 +77,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.path == "") {
+		if msg.String() == "ctrl+c" || msg.String() == "q" {
 			return m, tea.Quit
 		}
 		if m.mode == repositoriesMode {
-			if msg.String() == "q" {
-				return m, tea.Quit
-			}
 			return m, nil
 		}
 
@@ -142,37 +139,98 @@ func (m model) View() string {
 }
 
 func (m model) setupView() string {
-	content := titleStyle.Render("mds") + "\n" + mutedStyle.Render("UBC MDS repository tracker") + "\n\n" +
-		"First-time setup\n\n" +
-		"Location of UBC MDS folder:\n" + promptStyle.Render("> "+m.path+"█")
-	if m.err != nil {
-		content += "\n\n" + errorStyle.Render("Error: "+m.err.Error())
+	width := m.contentWidth()
+	lines := []string{
+		titleStyle.Render("mds"),
+		mutedStyle.Render("UBC MDS repository tracker"),
+		"",
+		"First-time setup",
+		"",
+		"Location of UBC MDS folder:",
+		promptStyle.Render("> " + truncateLeft(m.path, max(1, width-3)) + "█"),
 	}
-	content += "\n\n" + mutedStyle.Render("Enter to continue · Ctrl+C to quit")
-	return m.fullScreen(content)
+	if m.err != nil {
+		lines = append(lines, "", errorStyle.Render(truncate("Error: "+m.err.Error(), width)))
+	}
+	lines = append(lines, "", mutedStyle.Render(truncate("Enter to continue · q or Ctrl+C to quit", width)))
+	return m.fullScreen(lines)
 }
 
 func (m model) repositoriesView() string {
-	content := titleStyle.Render("mds") + "  " + mutedStyle.Render("UBC MDS repositories") + "\n" +
-		mutedStyle.Render(m.path) + "\n\n"
+	width := m.contentWidth()
+	lines := []string{
+		titleStyle.Render("mds") + "  " + mutedStyle.Render("UBC MDS repositories"),
+		mutedStyle.Render(truncate(m.path, width)),
+		"",
+	}
 	if m.err != nil {
-		content += errorStyle.Render("Unable to scan repositories: " + m.err.Error())
+		lines = append(lines, errorStyle.Render(truncate("Unable to scan repositories: "+m.err.Error(), width)))
 	} else if len(m.repositories) == 0 {
-		content += mutedStyle.Render("No Git repositories found in this folder.")
+		lines = append(lines, mutedStyle.Render("No Git repositories found in this folder."))
 	} else {
-		for _, repository := range m.repositories {
-			content += selectedStyle.Render("• ") + repository + "\n"
+		availableRows := max(1, m.contentHeight()-6)
+		visible := min(len(m.repositories), availableRows)
+		for _, repository := range m.repositories[:visible] {
+			lines = append(lines, selectedStyle.Render("• ")+truncate(repository, max(1, width-2)))
+		}
+		if remaining := len(m.repositories) - visible; remaining > 0 {
+			lines = append(lines, mutedStyle.Render(fmt.Sprintf("… %d more repositories", remaining)))
 		}
 	}
-	content += "\n" + mutedStyle.Render(fmt.Sprintf("%d repositories · q to quit", len(m.repositories)))
-	return m.fullScreen(content)
+	lines = append(lines, "", mutedStyle.Render(truncate(fmt.Sprintf("%d repositories · q to quit", len(m.repositories)), width)))
+	return m.fullScreen(lines)
 }
 
-func (m model) fullScreen(content string) string {
-	width := max(40, m.width)
-	height := max(12, m.height)
-	panel := borderStyle.Width(width - 6).Height(height - 4).Render(content)
+func (m model) fullScreen(lines []string) string {
+	width := m.viewportWidth()
+	height := m.viewportHeight()
+	content := strings.Join(lines, "\n")
+	panel := borderStyle.Width(max(1, width-6)).Height(max(1, height-4)).Render(content)
 	return "\n" + lipgloss.NewStyle().PaddingLeft(2).Render(panel) + "\n"
+}
+
+func (m model) viewportWidth() int {
+	if m.width > 0 {
+		return m.width
+	}
+	return 80
+}
+
+func (m model) viewportHeight() int {
+	if m.height > 0 {
+		return m.height
+	}
+	return 24
+}
+
+func (m model) contentWidth() int {
+	return max(1, m.viewportWidth()-10)
+}
+
+func (m model) contentHeight() int {
+	return max(1, m.viewportHeight()-6)
+}
+
+func truncate(value string, width int) string {
+	runes := []rune(value)
+	if len(runes) <= width {
+		return value
+	}
+	if width <= 1 {
+		return string(runes[:width])
+	}
+	return string(runes[:width-1]) + "…"
+}
+
+func truncateLeft(value string, width int) string {
+	runes := []rune(value)
+	if len(runes) <= width {
+		return value
+	}
+	if width <= 1 {
+		return string(runes[len(runes)-width:])
+	}
+	return "…" + string(runes[len(runes)-width+1:])
 }
 
 func findRepositories(root string) ([]string, error) {
@@ -239,6 +297,13 @@ func saveFolder(folder string) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o600)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func max(a, b int) int {

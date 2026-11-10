@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,6 +18,28 @@ func TestSetupAcceptsPastedPath(t *testing.T) {
 	want := "/Users/penrose/Documents/MDS"
 	if got != want {
 		t.Fatalf("setup path = %q, want %q", got, want)
+	}
+}
+
+func TestTruncateForTerminalWidth(t *testing.T) {
+	if got, want := truncate("repository-name", 8), "reposit…"; got != want {
+		t.Fatalf("truncate() = %q, want %q", got, want)
+	}
+	if got, want := truncateLeft("/Users/penrose/Documents/MDS", 12), "…cuments/MDS"; got != want {
+		t.Fatalf("truncateLeft() = %q, want %q", got, want)
+	}
+}
+
+func TestRepositoriesViewLimitsRowsToViewport(t *testing.T) {
+	m := model{
+		mode:         repositoriesMode,
+		width:        60,
+		height:       12,
+		repositories: []string{"one", "two", "three", "four", "five", "six", "seven"},
+	}
+	view := m.repositoriesView()
+	if !strings.Contains(view, "more repositories") {
+		t.Fatalf("expected an overflow summary, got %q", view)
 	}
 }
 
