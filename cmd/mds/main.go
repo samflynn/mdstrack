@@ -43,7 +43,7 @@ var (
 	borderStyle   = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
 	promptStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
-	cursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("238"))
+	cursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
 )
 
 func main() {
@@ -180,7 +180,7 @@ func (m model) repositoriesView() string {
 		for index := start; index < end; index++ {
 			row := truncate(m.repositories[index], max(1, width-3))
 			if index == m.cursor {
-				lines = append(lines, cursorStyle.Width(width).Render("▸ "+row))
+				lines = append(lines, cursorStyle.Render("▸ "+row))
 				continue
 			}
 			lines = append(lines, selectedStyle.Render("• ")+row)
