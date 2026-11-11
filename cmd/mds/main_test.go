@@ -267,6 +267,35 @@ func TestSearchOpensAndFiltersAccessibleRepositories(t *testing.T) {
 	}
 }
 
+func TestSearchCloneRequiresConfirmation(t *testing.T) {
+	m := model{mode: searchMode, width: 80, height: 20, searchResults: []githubSearchRepository{{FullName: "mds-2026-27/DSCI_511_lab1"}}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = updated.(model)
+	if got, want := m.cloneConfirmation, "mds-2026-27/DSCI_511_lab1"; got != want {
+		t.Fatalf("clone confirmation = %q, want %q", got, want)
+	}
+	if view := m.searchView(); !strings.Contains(view, "Clone mds-2026-27/DSCI_511_lab1") || !strings.Contains(view, "y yes") || !strings.Contains(view, "n no") || lipgloss.Height(view) != m.viewportHeight() {
+		t.Fatalf("expected terminal-safe clone confirmation footer, got %q", view)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updated.(model)
+	if m.cloneConfirmation != "" {
+		t.Fatal("expected n to cancel clone confirmation")
+	}
+}
+
+func TestCloneGitHubRepositoryRefusesExistingDestination(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workspace, "DSCI_511_lab1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	message := cloneGitHubRepository(workspace, "github.ubc.ca", "mds-2026-27/DSCI_511_lab1")()
+	result, ok := message.(cloneRepositoryMsg)
+	if !ok || result.err == nil || !strings.Contains(result.err.Error(), "already exists") {
+		t.Fatalf("clone result = %#v, want existing destination error", message)
+	}
+}
+
 func TestGitHubCommitCountMatchesLoginOrDisplayName(t *testing.T) {
 	commits := []githubCommit{
 		{Author: &struct {

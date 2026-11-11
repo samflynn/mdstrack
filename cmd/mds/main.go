@@ -61,6 +61,12 @@ type clonedRepositoriesMsg struct {
 	repositories map[string]bool
 }
 
+type cloneRepositoryMsg struct {
+	repository string
+	path       string
+	err        error
+}
+
 type githubSearchRepository struct {
 	FullName string `json:"full_name"`
 }
@@ -103,6 +109,8 @@ type model struct {
 	searchError        error
 	hideCloned         bool
 	clonedRepositories map[string]bool
+	cloneConfirmation  string
+	cloneStatus        string
 	cursor             int
 	err                error
 	width              int
@@ -207,6 +215,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.searchResults, m.searchError, m.searchLoading = msg.repositories, msg.err, false
 	case clonedRepositoriesMsg:
 		m.clonedRepositories = msg.repositories
+	case cloneRepositoryMsg:
+		if msg.err != nil {
+			m.cloneStatus = "Clone failed: " + msg.err.Error()
+			break
+		}
+		m.cloneStatus = "Cloned " + msg.repository
+		if m.clonedRepositories == nil {
+			m.clonedRepositories = make(map[string]bool)
+		}
+		m.clonedRepositories[msg.repository] = true
+		m.repositories, m.err = findRepositories(m.path)
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.mode != setupMode && !m.editingTitle && m.editingSetting == "") {
 			return m, tea.Quit
@@ -440,6 +459,17 @@ func (m model) settingsView() string {
 }
 
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.cloneConfirmation != "" {
+		switch msg.String() {
+		case "y":
+			repository := m.cloneConfirmation
+			m.cloneConfirmation = ""
+			return m, cloneGitHubRepository(m.path, m.githubHost, repository)
+		case "n", "esc":
+			m.cloneConfirmation = ""
+		}
+		return m, nil
+	}
 	if m.searchLoading {
 		if msg.String() == "esc" {
 			m.mode = repositoriesMode
@@ -456,6 +486,11 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "h":
 		m.hideCloned = !m.hideCloned
 		m.searchCursor = 0
+	case "c":
+		results := m.filteredSearchResults()
+		if m.searchCursor < len(results) {
+			m.cloneConfirmation, m.cloneStatus = results[m.searchCursor].FullName, ""
+		}
 	case "backspace", "ctrl+h":
 		m.githubSearch = removeLastRune(m.githubSearch)
 		m.searchCursor = 0
@@ -496,7 +531,13 @@ func (m model) searchView() string {
 	if m.hideCloned {
 		hideClonedLabel = "h show cloned"
 	}
-	lines = append(lines, "", mutedStyle.Render("Type to filter · ↑/↓ move · "+hideClonedLabel+" · Esc back · q quit"))
+	footer := "Type to filter · ↑/↓ move · c clone · " + hideClonedLabel + " · Esc back · q quit"
+	if m.cloneConfirmation != "" {
+		footer = "Clone " + m.cloneConfirmation + " into workspace? y yes · n no"
+	} else if m.cloneStatus != "" {
+		footer = m.cloneStatus
+	}
+	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
 }
 
@@ -1096,6 +1137,24 @@ func findClonedRepositories(workspace string, repositories []string, configuredH
 			}
 		}
 		return clonedRepositoriesMsg{repositories: cloned}
+	}
+}
+
+func cloneGitHubRepository(workspace, host, repository string) tea.Cmd {
+	return func() tea.Msg {
+		name := filepath.Base(repository)
+		destination := filepath.Join(workspace, name)
+		if _, err := os.Stat(destination); err == nil {
+			return cloneRepositoryMsg{repository: repository, path: destination, err: fmt.Errorf("destination %q already exists", name)}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return cloneRepositoryMsg{repository: repository, path: destination, err: fmt.Errorf("inspect clone destination: %w", err)}
+		}
+		url := fmt.Sprintf("https://%s/%s.git", host, repository)
+		output, err := exec.Command("git", "clone", url, destination).CombinedOutput()
+		if err != nil {
+			return cloneRepositoryMsg{repository: repository, path: destination, err: fmt.Errorf("git clone: %s", strings.TrimSpace(string(output)))}
+		}
+		return cloneRepositoryMsg{repository: repository, path: destination}
 	}
 }
 
