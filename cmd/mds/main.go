@@ -56,6 +56,10 @@ type githubSearchResultsMsg struct {
 	err          error
 }
 
+type clonedRepositoriesMsg struct {
+	repositories map[string]bool
+}
+
 type githubSearchRepository struct {
 	FullName string `json:"full_name"`
 }
@@ -69,36 +73,38 @@ type repositoryListRow struct {
 }
 
 type model struct {
-	mode              mode
-	path              string
-	githubUsername    string
-	githubProfileName string
-	githubHost        string
-	setupStep         int
-	settingsCursor    int
-	editingSetting    string
-	settingInput      string
-	repositories      []string
-	favorites         map[string]bool
-	commitCounts      map[string]int
-	commitErrors      map[string]error
-	loadingCommits    bool
-	spinnerFrame      int
-	collapsed         map[string]bool
-	favoritesTitle    string
-	editingTitle      bool
-	titleInput        string
-	githubActions     bool
-	actionStatus      string
-	githubSearch      string
-	searchResults     []githubSearchRepository
-	searchCursor      int
-	searchLoading     bool
-	searchError       error
-	cursor            int
-	err               error
-	width             int
-	height            int
+	mode               mode
+	path               string
+	githubUsername     string
+	githubProfileName  string
+	githubHost         string
+	setupStep          int
+	settingsCursor     int
+	editingSetting     string
+	settingInput       string
+	repositories       []string
+	favorites          map[string]bool
+	commitCounts       map[string]int
+	commitErrors       map[string]error
+	loadingCommits     bool
+	spinnerFrame       int
+	collapsed          map[string]bool
+	favoritesTitle     string
+	editingTitle       bool
+	titleInput         string
+	githubActions      bool
+	actionStatus       string
+	githubSearch       string
+	searchResults      []githubSearchRepository
+	searchCursor       int
+	searchLoading      bool
+	searchError        error
+	hideCloned         bool
+	clonedRepositories map[string]bool
+	cursor             int
+	err                error
+	width              int
+	height             int
 }
 
 var (
@@ -197,6 +203,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case githubSearchResultsMsg:
 		m.searchResults, m.searchError, m.searchLoading = msg.repositories, msg.err, false
+	case clonedRepositoriesMsg:
+		m.clonedRepositories = msg.repositories
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.mode != setupMode && !m.editingTitle && m.editingSetting == "") {
 			return m, tea.Quit
@@ -236,7 +244,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "/":
 				m.mode, m.githubSearch, m.searchCursor, m.searchError = searchMode, "", 0, nil
 				m.searchLoading = true
-				return m, loadGitHubRepositories(m.githubHost)
+				return m, tea.Batch(loadGitHubRepositories(m.githubHost), findClonedRepositories(m.path, m.repositories, m.githubHost))
 			case "s":
 				m.mode, m.err = settingsMode, nil
 			case "up", "k":
@@ -428,6 +436,9 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searchCursor = max(0, m.searchCursor-1)
 	case "down", "j":
 		m.searchCursor = min(max(0, len(m.filteredSearchResults())-1), m.searchCursor+1)
+	case "h":
+		m.hideCloned = !m.hideCloned
+		m.searchCursor = 0
 	case "backspace", "ctrl+h":
 		m.githubSearch = removeLastRune(m.githubSearch)
 		m.searchCursor = 0
@@ -464,17 +475,21 @@ func (m model) searchView() string {
 			lines = append(lines, "", mutedStyle.Render("No accessible repositories match your search."))
 		}
 	}
-	lines = append(lines, "", mutedStyle.Render("Type to filter · ↑/↓ move · Esc back · q quit"))
+	hideClonedLabel := "h hide cloned"
+	if m.hideCloned {
+		hideClonedLabel = "h show cloned"
+	}
+	lines = append(lines, "", mutedStyle.Render("Type to filter · ↑/↓ move · "+hideClonedLabel+" · Esc back · q quit"))
 	return m.fullScreen(lines)
 }
 
 func (m model) filteredSearchResults() []githubSearchRepository {
 	query := strings.ToLower(strings.TrimSpace(m.githubSearch))
-	if query == "" {
-		return m.searchResults
-	}
 	results := make([]githubSearchRepository, 0, len(m.searchResults))
 	for _, repository := range m.searchResults {
+		if m.hideCloned && m.clonedRepositories[repository.FullName] {
+			continue
+		}
 		if strings.Contains(strings.ToLower(repository.FullName), query) {
 			results = append(results, repository)
 		}
@@ -1021,6 +1036,23 @@ func loadGitHubRepositories(host string) tea.Cmd {
 			return strings.ToLower(repositories[left].FullName) < strings.ToLower(repositories[right].FullName)
 		})
 		return githubSearchResultsMsg{repositories: repositories}
+	}
+}
+
+func findClonedRepositories(workspace string, repositories []string, configuredHost string) tea.Cmd {
+	return func() tea.Msg {
+		cloned := make(map[string]bool)
+		for _, repository := range repositories {
+			remote, err := gitOriginURL(filepath.Join(workspace, repository))
+			if err != nil {
+				continue
+			}
+			host, owner, name, ok := githubRepository(remote)
+			if ok && strings.EqualFold(host, configuredHost) {
+				cloned[owner+"/"+name] = true
+			}
+		}
+		return clonedRepositoriesMsg{repositories: cloned}
 	}
 }
 

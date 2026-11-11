@@ -192,6 +192,25 @@ func TestSearchOpensAndFiltersAccessibleRepositories(t *testing.T) {
 	if got, want := len(results), 1; got != want || results[0].FullName != "mds-2026-27/DSCI_521_lab0" {
 		t.Fatalf("filtered search results = %#v, want only the 521 repository", results)
 	}
+	m.githubSearch = ""
+	m.clonedRepositories = map[string]bool{"mds-2026-27/DSCI_511_lab1": true}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	m = updated.(model)
+	if !m.hideCloned {
+		t.Fatal("expected h to hide cloned repositories")
+	}
+	results = m.filteredSearchResults()
+	if got, want := len(results), 2; got != want {
+		t.Fatalf("hidden-clone results = %#v, want %d repositories", results, want)
+	}
+	for _, repository := range results {
+		if repository.FullName == "mds-2026-27/DSCI_511_lab1" {
+			t.Fatal("expected cloned repository to be hidden")
+		}
+	}
+	if view := m.searchView(); !strings.Contains(view, "h show cloned") {
+		t.Fatalf("expected search view to describe the active hide state, got %q", view)
+	}
 	if got, want := lipgloss.Height(m.searchView()), m.viewportHeight(); got != want {
 		t.Fatalf("search view height = %d, want terminal height %d", got, want)
 	}
