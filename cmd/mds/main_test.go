@@ -214,10 +214,27 @@ func TestUntrackingRepositoryClearsOnlyItsCommitState(t *testing.T) {
 	}
 }
 
-func TestTrackedRepositoryRendersCommitCount(t *testing.T) {
-	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{"511/lab-one": 14}, collapsed: map[string]bool{}}
-	if !strings.Contains(m.repositoriesView(), "14 commits") {
-		t.Fatal("expected tracked repository to render its GitHub commit count")
+func TestCommitProgressBarCapsAtThreeSegments(t *testing.T) {
+	for _, test := range []struct {
+		count int
+		want  string
+	}{
+		{count: 0, want: "░░░"},
+		{count: 1, want: "█░░"},
+		{count: 2, want: "██░"},
+		{count: 3, want: "███"},
+		{count: 5, want: "███"},
+	} {
+		if got := commitProgressBar(test.count); got != test.want {
+			t.Errorf("commitProgressBar(%d) = %q, want %q", test.count, got, test.want)
+		}
+	}
+}
+
+func TestTrackedRepositoryRendersCommitProgress(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{"511/lab-one": 5}, collapsed: map[string]bool{}}
+	if !strings.Contains(m.repositoriesView(), "5/3") {
+		t.Fatal("expected tracked repository to render its GitHub commit progress")
 	}
 }
 

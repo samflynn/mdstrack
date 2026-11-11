@@ -502,7 +502,7 @@ func (m model) repositoriesView() string {
 			countText := ""
 			if m.favorites[m.repositories[row.index]] {
 				if count, ok := m.commitCounts[m.repositories[row.index]]; ok {
-					countText = fmt.Sprintf("%d commits", count)
+					countText = commitProgress(count)
 				} else if m.commitErrors[m.repositories[row.index]] != nil {
 					countText = "GH ERROR"
 				} else if m.loadingCommits {
@@ -726,6 +726,26 @@ func truncateLeft(value string, width int) string {
 		return string(runes[len(runes)-width:])
 	}
 	return "…" + string(runes[len(runes)-width+1:])
+}
+
+func commitProgress(count int) string {
+	return fmt.Sprintf("%d/3 %s", count, commitProgressStyle(count).Render(commitProgressBar(count)))
+}
+
+func commitProgressBar(count int) string {
+	filled := min(max(count, 0), 3)
+	return strings.Repeat("█", filled) + strings.Repeat("░", 3-filled)
+}
+
+func commitProgressStyle(count int) lipgloss.Style {
+	switch {
+	case count >= 3:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+	case count == 2:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	}
 }
 
 func findRepositories(root string) ([]string, error) {
