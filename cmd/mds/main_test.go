@@ -174,6 +174,46 @@ func TestTrackedRepositoryRendersLoadingSpinner(t *testing.T) {
 	}
 }
 
+func TestCommitCountUpdatePreservesUnrelatedTrackedCounts(t *testing.T) {
+	m := model{
+		mode:         repositoriesMode,
+		commitCounts: map[string]int{"511/old": 8},
+		commitErrors: map[string]error{},
+	}
+	updated, _ := m.Update(commitCountsMsg{
+		counts:       map[string]int{"511/new": 3},
+		errors:       map[string]error{},
+		repositories: []string{"511/new"},
+	})
+	m = updated.(model)
+	if got, want := m.commitCounts["511/old"], 8; got != want {
+		t.Fatalf("existing count = %d, want %d", got, want)
+	}
+	if got, want := m.commitCounts["511/new"], 3; got != want {
+		t.Fatalf("new count = %d, want %d", got, want)
+	}
+}
+
+func TestUntrackingRepositoryClearsOnlyItsCommitState(t *testing.T) {
+	m := model{
+		mode:         repositoriesMode,
+		repositories: []string{"511/first", "511/second"},
+		favorites:    map[string]bool{"511/first": true, "511/second": true},
+		commitCounts: map[string]int{"511/first": 2, "511/second": 5},
+		commitErrors: map[string]error{},
+		collapsed:    map[string]bool{},
+	}
+	if repository, tracked := m.activateRow(repositoryListRow{index: 0}); repository != "511/first" || tracked {
+		t.Fatalf("untracking result = (%q, %t), want (511/first, false)", repository, tracked)
+	}
+	if _, ok := m.commitCounts["511/first"]; ok {
+		t.Fatal("expected untracked repository count to be cleared")
+	}
+	if got, want := m.commitCounts["511/second"], 5; got != want {
+		t.Fatalf("unrelated count = %d, want %d", got, want)
+	}
+}
+
 func TestTrackedRepositoryRendersCommitCount(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{"511/lab-one": 14}, collapsed: map[string]bool{}}
 	if !strings.Contains(m.repositoriesView(), "14 commits") {

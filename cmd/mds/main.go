@@ -37,8 +37,9 @@ const (
 )
 
 type commitCountsMsg struct {
-	counts map[string]int
-	errors map[string]error
+	counts       map[string]int
+	errors       map[string]error
+	repositories []string
 }
 
 type commitSpinnerTickMsg struct{}
@@ -123,14 +124,12 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), nextCommitSpinnerTick())
 }
 
-func (m *model) startCommitCountLoad() tea.Cmd {
-	m.commitCounts = make(map[string]int)
-	m.commitErrors = make(map[string]error)
-	m.loadingCommits = hasTrackedRepositories(m.favorites)
+func (m *model) startCommitCountLoad(repositories []string) tea.Cmd {
+	m.loadingCommits = len(repositories) > 0
 	if !m.loadingCommits {
 		return nil
 	}
-	return tea.Batch(loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), nextCommitSpinnerTick())
+	return tea.Batch(loadTrackedCommitCounts(m.path, repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), nextCommitSpinnerTick())
 }
 
 func hasTrackedRepositories(favorites map[string]bool) bool {
@@ -153,7 +152,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case commitCountsMsg:
-		m.commitCounts, m.commitErrors = msg.counts, msg.errors
+		for _, repository := range msg.repositories {
+			delete(m.commitCounts, repository)
+			delete(m.commitErrors, repository)
+		}
+		for repository, count := range msg.counts {
+			m.commitCounts[repository] = count
+		}
+		for repository, err := range msg.errors {
+			m.commitErrors[repository] = err
+		}
 		m.loadingCommits = false
 	case commitSpinnerTickMsg:
 		if m.loadingCommits {
@@ -202,8 +210,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "enter":
 				if len(rows) > 0 {
-					m.activateRow(rows[m.cursor])
-					return m, m.startCommitCountLoad()
+					repository, tracked := m.activateRow(rows[m.cursor])
+					if tracked {
+						return m, m.startCommitCountLoad([]string{repository})
+					}
+					return m, nil
 				}
 			}
 			return m, nil
@@ -545,9 +556,9 @@ func (m model) favoritesDisplayTitle() string {
 	return strings.ToUpper(m.favoritesTitle) + " (TRACKING)"
 }
 
-func (m *model) activateRow(row repositoryListRow) {
+func (m *model) activateRow(row repositoryListRow) (string, bool) {
 	if row.key == "divider" {
-		return
+		return "", false
 	}
 	if row.header {
 		if m.collapsed == nil {
@@ -555,7 +566,7 @@ func (m *model) activateRow(row repositoryListRow) {
 		}
 		m.collapsed[row.key] = !m.collapsed[row.key]
 		m.savePreferences()
-		return
+		return "", false
 	}
 	if m.favorites == nil {
 		m.favorites = make(map[string]bool)
@@ -569,12 +580,18 @@ func (m *model) activateRow(row repositoryListRow) {
 	}
 	repository := m.repositories[row.index]
 	m.favorites[repository] = !m.favorites[repository]
+	tracked := m.favorites[repository]
+	if !tracked {
+		delete(m.commitCounts, repository)
+		delete(m.commitErrors, repository)
+	}
 	m.savePreferences()
 	if nextRepository != "" {
 		m.cursor = m.rowCursorForRepository(nextRepository)
 	} else {
 		m.cursor = min(m.cursor, max(0, len(m.repositoryListRows())-1))
 	}
+	return repository, tracked
 }
 
 func (m *model) savePreferences() {
@@ -740,7 +757,7 @@ func loadTrackedCommitCounts(workspace string, repositories []string, favorites 
 		counts := make(map[string]int)
 		failures := make(map[string]error)
 		if username == "" {
-			return commitCountsMsg{counts: counts, errors: failures}
+			return commitCountsMsg{counts: counts, errors: failures, repositories: repositories}
 		}
 		for _, repository := range repositories {
 			if !favorites[repository] {
@@ -768,7 +785,7 @@ func loadTrackedCommitCounts(workspace string, repositories []string, favorites 
 			}
 			counts[repository] = count
 		}
-		return commitCountsMsg{counts: counts, errors: failures}
+		return commitCountsMsg{counts: counts, errors: failures, repositories: repositories}
 	}
 }
 
