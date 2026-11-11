@@ -174,6 +174,33 @@ func TestGitHubActionsMenuDoesNotOverflowTerminal(t *testing.T) {
 	}
 }
 
+func TestSearchOpensAndFiltersAccessibleRepositories(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 80, height: 20, githubHost: "github.ubc.ca", searchResults: []githubSearchRepository{{FullName: "mds-2026-27/DSCI_511_lab1"}, {FullName: "mds-2026-27/DSCI_521_lab0"}, {FullName: "other/course"}}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updated.(model)
+	if m.mode != searchMode || !m.searchLoading {
+		t.Fatal("expected slash to open the loading search page")
+	}
+	updated, _ = m.Update(githubSearchResultsMsg{repositories: m.searchResults})
+	m = updated.(model)
+	if m.searchLoading {
+		t.Fatal("expected search results to finish loading")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("521")})
+	m = updated.(model)
+	results := m.filteredSearchResults()
+	if got, want := len(results), 1; got != want || results[0].FullName != "mds-2026-27/DSCI_521_lab0" {
+		t.Fatalf("filtered search results = %#v, want only the 521 repository", results)
+	}
+	if got, want := lipgloss.Height(m.searchView()), m.viewportHeight(); got != want {
+		t.Fatalf("search view height = %d, want terminal height %d", got, want)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(model).mode != repositoriesMode {
+		t.Fatal("expected Esc to return from search to repositories")
+	}
+}
+
 func TestGitHubCommitCountMatchesLoginOrDisplayName(t *testing.T) {
 	commits := []githubCommit{
 		{Author: &struct {

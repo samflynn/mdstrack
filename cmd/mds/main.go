@@ -36,6 +36,7 @@ const (
 	setupMode mode = iota
 	repositoriesMode
 	settingsMode
+	searchMode
 )
 
 type commitCountsMsg struct {
@@ -48,6 +49,15 @@ type commitSpinnerTickMsg struct{}
 
 type repositoryActionMsg struct {
 	err error
+}
+
+type githubSearchResultsMsg struct {
+	repositories []githubSearchRepository
+	err          error
+}
+
+type githubSearchRepository struct {
+	FullName string `json:"full_name"`
 }
 
 type repositoryListRow struct {
@@ -80,6 +90,11 @@ type model struct {
 	titleInput        string
 	githubActions     bool
 	actionStatus      string
+	githubSearch      string
+	searchResults     []githubSearchRepository
+	searchCursor      int
+	searchLoading     bool
+	searchError       error
 	cursor            int
 	err               error
 	width             int
@@ -180,12 +195,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.actionStatus = "Action failed: " + msg.err.Error()
 		}
+	case githubSearchResultsMsg:
+		m.searchResults, m.searchError, m.searchLoading = msg.repositories, msg.err, false
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.mode != setupMode && !m.editingTitle && m.editingSetting == "") {
 			return m, tea.Quit
 		}
 		if m.mode == settingsMode {
 			return m.updateSettings(msg)
+		}
+		if m.mode == searchMode {
+			return m.updateSearch(msg)
 		}
 		if m.mode == repositoriesMode {
 			if m.githubActions {
@@ -213,6 +233,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			rows := m.repositoryListRows()
 			switch msg.String() {
+			case "/":
+				m.mode, m.githubSearch, m.searchCursor, m.searchError = searchMode, "", 0, nil
+				m.searchLoading = true
+				return m, loadGitHubRepositories(m.githubHost)
 			case "s":
 				m.mode, m.err = settingsMode, nil
 			case "up", "k":
@@ -340,6 +364,8 @@ func (m model) View() string {
 		return m.setupView()
 	case settingsMode:
 		return m.settingsView()
+	case searchMode:
+		return m.searchView()
 	default:
 		return m.repositoriesView()
 	}
@@ -386,6 +412,74 @@ func (m model) settingsView() string {
 	}
 	lines = append(lines, "", mutedStyle.Render("↑/↓ select · Enter edit · Esc back · q quit"))
 	return m.fullScreen(lines)
+}
+
+func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.searchLoading {
+		if msg.String() == "esc" {
+			m.mode = repositoriesMode
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.mode = repositoriesMode
+	case "up", "k":
+		m.searchCursor = max(0, m.searchCursor-1)
+	case "down", "j":
+		m.searchCursor = min(max(0, len(m.filteredSearchResults())-1), m.searchCursor+1)
+	case "backspace", "ctrl+h":
+		m.githubSearch = removeLastRune(m.githubSearch)
+		m.searchCursor = 0
+	default:
+		if isTextInputKey(msg) {
+			m.githubSearch += string(msg.Runes)
+			m.searchCursor = 0
+		}
+	}
+	return m, nil
+}
+
+func (m model) searchView() string {
+	width := m.contentWidth()
+	lines := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("GitHub repository search"), mutedStyle.Render("Accessible repositories on " + m.githubHost), "", promptStyle.Render("/ " + truncateLeft(m.githubSearch, max(1, width-3)) + "█")}
+	if m.searchLoading {
+		lines = append(lines, "", mutedStyle.Render("Loading accessible repositories..."))
+	} else if m.searchError != nil {
+		lines = append(lines, "", errorStyle.Render(truncate("Unable to load repositories: "+m.searchError.Error(), width)))
+	} else {
+		results := m.filteredSearchResults()
+		visible := max(1, m.contentHeight()-8)
+		start := max(0, min(m.searchCursor, max(0, len(results)-visible)))
+		end := min(len(results), start+visible)
+		for index, repository := range results[start:end] {
+			prefix := "  "
+			style := mutedStyle
+			if start+index == m.searchCursor {
+				prefix, style = "▸ ", cursorStyle
+			}
+			lines = append(lines, style.Render(prefix+truncate(repository.FullName, width-2)))
+		}
+		if len(results) == 0 {
+			lines = append(lines, "", mutedStyle.Render("No accessible repositories match your search."))
+		}
+	}
+	lines = append(lines, "", mutedStyle.Render("Type to filter · ↑/↓ move · Esc back · q quit"))
+	return m.fullScreen(lines)
+}
+
+func (m model) filteredSearchResults() []githubSearchRepository {
+	query := strings.ToLower(strings.TrimSpace(m.githubSearch))
+	if query == "" {
+		return m.searchResults
+	}
+	results := make([]githubSearchRepository, 0, len(m.searchResults))
+	for _, repository := range m.searchResults {
+		if strings.Contains(strings.ToLower(repository.FullName), query) {
+			results = append(results, repository)
+		}
+	}
+	return results
 }
 
 type settingValue struct {
@@ -906,6 +1000,27 @@ func loadTrackedCommitCounts(workspace string, repositories []string, favorites 
 			counts[repository] = count
 		}
 		return commitCountsMsg{counts: counts, errors: failures, repositories: repositories}
+	}
+}
+
+func loadGitHubRepositories(host string) tea.Cmd {
+	return func() tea.Msg {
+		output, err := exec.Command("gh", "api", "--hostname", host, "--paginate", "--slurp", "user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=full_name").CombinedOutput()
+		if err != nil {
+			return githubSearchResultsMsg{err: fmt.Errorf("query GitHub repositories: %s", strings.TrimSpace(string(output)))}
+		}
+		var pages [][]githubSearchRepository
+		if err := json.Unmarshal(output, &pages); err != nil {
+			return githubSearchResultsMsg{err: fmt.Errorf("decode GitHub repositories: %w", err)}
+		}
+		var repositories []githubSearchRepository
+		for _, page := range pages {
+			repositories = append(repositories, page...)
+		}
+		sort.Slice(repositories, func(left, right int) bool {
+			return strings.ToLower(repositories[left].FullName) < strings.ToLower(repositories[right].FullName)
+		})
+		return githubSearchResultsMsg{repositories: repositories}
 	}
 }
 
