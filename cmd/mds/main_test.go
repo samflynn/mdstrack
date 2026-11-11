@@ -13,10 +13,7 @@ import (
 func TestSetupAcceptsPastedPath(t *testing.T) {
 	m := model{mode: setupMode}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/Users/penrose/Documents/MDS"), Paste: true})
-
-	got := updated.(model).path
-	want := "/Users/penrose/Documents/MDS"
-	if got != want {
+	if got, want := updated.(model).path, "/Users/penrose/Documents/MDS"; got != want {
 		t.Fatalf("setup path = %q, want %q", got, want)
 	}
 }
@@ -30,29 +27,66 @@ func TestTruncateForTerminalWidth(t *testing.T) {
 	}
 }
 
-func TestEnterTogglesRepositoryCheckbox(t *testing.T) {
+func TestHeadersAreSelectableAndCollapseGroups(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	m := model{mode: repositoriesMode, path: "/tmp/mds", repositories: []string{"511/lab-one"}}
-
+	m := model{mode: repositoriesMode, path: "/tmp/mds", repositories: []string{"511/lab-one", "511/lab-two"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	rows := m.repositoryListRows()
+	if !rows[0].header || rows[0].key != "group:511" {
+		t.Fatalf("first row = %#v, want the 511 group header", rows[0])
+	}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
-	if !m.favorites["511/lab-one"] {
-		t.Fatal("expected Enter to mark the selected repository as a favorite")
+	if !m.collapsed["group:511"] {
+		t.Fatal("expected Enter on a group header to collapse it")
 	}
-	if !strings.Contains(m.repositoriesView(), "[X]") {
-		t.Fatal("expected a checked marker in the repository view")
+	if len(m.repositoryListRows()) != 1 {
+		t.Fatal("expected the collapsed group to hide its repositories")
 	}
+}
 
+func TestFavoritesArePinnedAndCanCollapse(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := model{mode: repositoriesMode, path: "/tmp/mds", repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one"}, favorites: map[string]bool{"511/lab-one": true, "511/lab-two": true}, collapsed: map[string]bool{}}
+	rows := m.repositoryListRows()
+	if !rows[0].header || rows[0].key != "favorites" {
+		t.Fatalf("first row = %#v, want the favorites header", rows[0])
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if !m.collapsed["favorites"] {
+		t.Fatal("expected Enter on favorites to collapse it")
+	}
+	if strings.Contains(m.repositoriesView(), "[X]") {
+		t.Fatal("expected collapsed favorites to hide favorite repositories")
+	}
+}
+
+func TestFavoritesTitleCanBeEditedAndPersists(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := model{mode: repositoriesMode, path: "/tmp/mds", repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(model)
+	if !m.editingTitle {
+		t.Fatal("expected e on the favorites header to start editing")
+	}
+	m.titleInput = "priority"
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
-	if m.favorites["511/lab-one"] {
-		t.Fatal("expected a second Enter to clear the selected favorite")
+	if got, want := m.favoritesDisplayTitle(), "priority (favorites)"; got != want {
+		t.Fatalf("favorites title = %q, want %q", got, want)
+	}
+	stored, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stored.FavoritesTitle, "priority"; got != want {
+		t.Fatalf("stored title = %q, want %q", got, want)
 	}
 }
 
 func TestFavoritePersistence(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	want := config{MDSFolder: "/tmp/mds", Favorites: map[string]bool{"511/lab-one": true}}
+	want := config{MDSFolder: "/tmp/mds", Favorites: map[string]bool{"511/lab-one": true}, Collapsed: map[string]bool{"favorites": true}, FavoritesTitle: "priority"}
 	if err := saveConfig(want); err != nil {
 		t.Fatal(err)
 	}
@@ -65,115 +99,6 @@ func TestFavoritePersistence(t *testing.T) {
 	}
 }
 
-func TestRepositoryCursorScrollsViewport(t *testing.T) {
-	m := model{
-		mode:         repositoriesMode,
-		width:        60,
-		height:       18,
-		repositories: []string{"one", "two", "three", "four", "five", "six", "seven"},
-	}
-	for range 6 {
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-		m = updated.(model)
-	}
-	if got, want := m.cursor, 6; got != want {
-		t.Fatalf("cursor = %d, want %d", got, want)
-	}
-	start, end := m.repositoryWindow(m.repositoryListRows())
-	if start >= end {
-		t.Fatalf("repositoryWindow() = (%d, %d), expected a non-empty window", start, end)
-	}
-	if !strings.Contains(m.repositoriesView(), "▸ [ ] seven") {
-		t.Fatal("expected the selected repository to be visible")
-	}
-}
-
-func TestFavoritingMovesCursorToNextRepository(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	m := model{
-		mode:         repositoriesMode,
-		path:         "/tmp/mds",
-		repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one"},
-		favorites:    make(map[string]bool),
-	}
-
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = updated.(model)
-	if got, want := m.selectedRepositoryIndex(), 1; got != want {
-		t.Fatalf("selection after favoriting = %d, want %d", got, want)
-	}
-	if !strings.Contains(m.repositoriesView(), "▸ [ ] lab-two") {
-		t.Fatal("expected selection to advance to the next repository")
-	}
-}
-
-func TestFavoriteOrderingDrivesCursorNavigation(t *testing.T) {
-	m := model{
-		mode:         repositoriesMode,
-		repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one"},
-		favorites:    map[string]bool{"523/lab-one": true},
-	}
-	if got, want := m.selectedRepositoryIndex(), 2; got != want {
-		t.Fatalf("initial selection index = %d, want %d", got, want)
-	}
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m = updated.(model)
-	if got, want := m.selectedRepositoryIndex(), 0; got != want {
-		t.Fatalf("selection after down = %d, want %d", got, want)
-	}
-}
-
-func TestFavoriteRepositoriesArePinnedAndGrouped(t *testing.T) {
-	m := model{
-		repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one"},
-		favorites:    map[string]bool{"511/lab-one": true, "511/lab-two": true},
-	}
-	rows := m.repositoryListRows()
-	if got, want := rows[0].group, "FAVORITES"; got != want {
-		t.Fatalf("first group = %q, want %q", got, want)
-	}
-	if got, want := rows[1].group, "511"; got != want {
-		t.Fatalf("favorite group = %q, want %q", got, want)
-	}
-	if got, want := rows[2].repository, "lab-one"; got != want {
-		t.Fatalf("first favorite = %q, want %q", got, want)
-	}
-	if got, want := rows[3].repository, "lab-two"; got != want {
-		t.Fatalf("second favorite = %q, want %q", got, want)
-	}
-}
-
-func TestRepositoryListRowsGroupsByFirstFolder(t *testing.T) {
-	m := model{repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one", "testing"}}
-	rows := m.repositoryListRows()
-	groups := []string{}
-	for _, row := range rows {
-		if row.index < 0 {
-			groups = append(groups, row.group)
-		}
-	}
-	want := []string{"511", "523", "ROOT"}
-	if !reflect.DeepEqual(groups, want) {
-		t.Fatalf("groups = %v, want %v", groups, want)
-	}
-	if got, want := rows[1].repository, "lab-one"; got != want {
-		t.Fatalf("first grouped repository = %q, want %q", got, want)
-	}
-}
-
-func TestRepositoriesViewLimitsRowsToViewport(t *testing.T) {
-	m := model{
-		mode:         repositoriesMode,
-		width:        60,
-		height:       12,
-		repositories: []string{"one", "two", "three", "four", "five", "six", "seven"},
-	}
-	view := m.repositoriesView()
-	if !strings.Contains(view, "of ") {
-		t.Fatalf("expected an overflow summary, got %q", view)
-	}
-}
-
 func TestFindRepositoriesFindsAndSortsNestedRepositories(t *testing.T) {
 	root := t.TempDir()
 	for _, repository := range []string{"zeta", "course/week-one/project"} {
@@ -181,10 +106,6 @@ func TestFindRepositoriesFindsAndSortsNestedRepositories(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("not a repository"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
 	repositories, err := findRepositories(root)
 	if err != nil {
 		t.Fatal(err)

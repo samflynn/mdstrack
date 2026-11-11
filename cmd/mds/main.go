@@ -16,8 +16,10 @@ import (
 const applicationName = "mds"
 
 type config struct {
-	MDSFolder string          `json:"mds_folder"`
-	Favorites map[string]bool `json:"favorites"`
+	MDSFolder      string          `json:"mds_folder"`
+	Favorites      map[string]bool `json:"favorites"`
+	Collapsed      map[string]bool `json:"collapsed"`
+	FavoritesTitle string          `json:"favorites_title"`
 }
 
 type mode int
@@ -31,17 +33,23 @@ type repositoryListRow struct {
 	group      string
 	repository string
 	index      int
+	key        string
+	header     bool
 }
 
 type model struct {
-	mode         mode
-	path         string
-	repositories []string
-	favorites    map[string]bool
-	cursor       int
-	err          error
-	width        int
-	height       int
+	mode           mode
+	path           string
+	repositories   []string
+	favorites      map[string]bool
+	collapsed      map[string]bool
+	favoritesTitle string
+	editingTitle   bool
+	titleInput     string
+	cursor         int
+	err            error
+	width          int
+	height         int
 }
 
 var (
@@ -51,7 +59,7 @@ var (
 	borderStyle   = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
 	promptStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
-	groupStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
+	groupStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Italic(true)
 	cursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
 )
 
@@ -78,7 +86,7 @@ func newModel() (model, error) {
 	}
 
 	repositories, err := findRepositories(stored.MDSFolder)
-	return model{mode: repositoriesMode, path: stored.MDSFolder, repositories: repositories, favorites: stored.Favorites, err: err}, nil
+	return model{mode: repositoriesMode, path: stored.MDSFolder, repositories: repositories, favorites: stored.Favorites, collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -88,33 +96,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" || msg.String() == "q" {
+		if msg.String() == "ctrl+c" || (msg.String() == "q" && !m.editingTitle) {
 			return m, tea.Quit
 		}
 		if m.mode == repositoriesMode {
-			indexes := m.repositoryIndexes()
+			if m.editingTitle {
+				switch msg.String() {
+				case "enter":
+					m.favoritesTitle = strings.TrimSpace(m.titleInput)
+					m.editingTitle = false
+					m.savePreferences()
+				case "esc":
+					m.editingTitle = false
+				case "backspace", "ctrl+h":
+					if len(m.titleInput) > 0 {
+						m.titleInput = m.titleInput[:len(m.titleInput)-1]
+					}
+				default:
+					if msg.Type == tea.KeyRunes {
+						m.titleInput += string(msg.Runes)
+					}
+				}
+				return m, nil
+			}
+
+			rows := m.repositoryListRows()
 			switch msg.String() {
 			case "up", "k":
 				m.cursor = max(0, m.cursor-1)
 			case "down", "j":
-				m.cursor = min(max(0, len(indexes)-1), m.cursor+1)
+				m.cursor = min(max(0, len(rows)-1), m.cursor+1)
+			case "e":
+				if len(rows) > 0 && rows[m.cursor].key == "favorites" {
+					m.editingTitle, m.titleInput = true, m.favoritesDisplayTitle()
+				}
 			case "enter":
-				if len(indexes) > 0 {
-					if m.favorites == nil {
-						m.favorites = make(map[string]bool)
-					}
-					repository := m.repositories[indexes[m.cursor]]
-					nextRepository := repository
-					if m.cursor+1 < len(indexes) {
-						nextRepository = m.repositories[indexes[m.cursor+1]]
-					}
-					m.favorites[repository] = !m.favorites[repository]
-					if err := saveConfig(config{MDSFolder: m.path, Favorites: m.favorites}); err != nil {
-						m.favorites[repository] = !m.favorites[repository]
-						m.err = fmt.Errorf("save favorites: %w", err)
-					} else {
-						m.cursor = m.repositoryCursor(nextRepository)
-					}
+				if len(rows) > 0 {
+					m.activateRow(rows[m.cursor])
 				}
 			}
 			return m, nil
@@ -158,12 +176,12 @@ func (m model) saveSetup() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if err := saveConfig(config{MDSFolder: absoluteFolder, Favorites: make(map[string]bool)}); err != nil {
+	if err := saveConfig(config{MDSFolder: absoluteFolder, Favorites: make(map[string]bool), Collapsed: make(map[string]bool)}); err != nil {
 		m.err = fmt.Errorf("save configuration: %w", err)
 		return m, nil
 	}
 	repositories, err := findRepositories(absoluteFolder)
-	m.mode, m.path, m.repositories, m.favorites, m.err = repositoriesMode, absoluteFolder, repositories, make(map[string]bool), err
+	m.mode, m.path, m.repositories, m.favorites, m.collapsed, m.err = repositoriesMode, absoluteFolder, repositories, make(map[string]bool), make(map[string]bool), err
 	return m, nil
 }
 
@@ -206,9 +224,19 @@ func (m model) repositoriesView() string {
 	} else {
 		rows := m.repositoryListRows()
 		start, end := m.repositoryWindow(rows)
-		for _, row := range rows[start:end] {
-			if row.index < 0 {
-				lines = append(lines, groupStyle.Render("[ "+truncate(row.group, width-4)+" ]"))
+		for index, row := range rows[start:end] {
+			selected := start+index == m.cursor
+			if row.header {
+				prefix := "⌄ "
+				if m.collapsed[row.key] {
+					prefix = "› "
+				}
+				label := prefix + truncate(row.group, width-3)
+				if selected {
+					lines = append(lines, cursorStyle.Render("▸ "+label))
+				} else {
+					lines = append(lines, groupStyle.Render(label))
+				}
 				continue
 			}
 			name := truncate(row.repository, max(1, width-5))
@@ -216,45 +244,69 @@ func (m model) repositoriesView() string {
 			if m.favorites[m.repositories[row.index]] {
 				marker = "[X]"
 			}
-			if row.index == m.selectedRepositoryIndex() {
+			if selected {
 				lines = append(lines, cursorStyle.Render("▸ "+marker+" "+name))
-				continue
+			} else {
+				lines = append(lines, selectedStyle.Render(marker+" ")+name)
 			}
-			lines = append(lines, selectedStyle.Render(marker+" ")+name)
 		}
 		if start > 0 || end < len(rows) {
 			lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", start+1, end, len(rows))))
 		}
 	}
-	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter favorite · q quit", len(m.repositories))
+	if m.editingTitle {
+		lines = append(lines, "", promptStyle.Render("Rename favorites: "+truncate(m.titleInput, max(1, width-18))+"█"), mutedStyle.Render("Enter save · Esc cancel"))
+	}
+	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter act · e rename favorites · q quit", len(m.repositories))
 	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
 }
 
-func (m model) repositoryIndexes() []int {
-	favorites := make([]int, 0, len(m.repositories))
-	regular := make([]int, 0, len(m.repositories))
-	for index, repository := range m.repositories {
-		if m.favorites[repository] {
-			favorites = append(favorites, index)
-			continue
+func (m model) favoritesDisplayTitle() string {
+	if m.favoritesTitle == "" {
+		return "favorites"
+	}
+	return m.favoritesTitle + " (favorites)"
+}
+
+func (m *model) activateRow(row repositoryListRow) {
+	if row.header {
+		if m.collapsed == nil {
+			m.collapsed = make(map[string]bool)
 		}
-		regular = append(regular, index)
+		m.collapsed[row.key] = !m.collapsed[row.key]
+		m.savePreferences()
+		return
 	}
-	return append(favorites, regular...)
+	if m.favorites == nil {
+		m.favorites = make(map[string]bool)
+	}
+	nextRepository := ""
+	for _, next := range m.repositoryListRows()[m.cursor+1:] {
+		if !next.header {
+			nextRepository = m.repositories[next.index]
+			break
+		}
+	}
+	repository := m.repositories[row.index]
+	m.favorites[repository] = !m.favorites[repository]
+	m.savePreferences()
+	if nextRepository != "" {
+		m.cursor = m.rowCursorForRepository(nextRepository)
+	} else {
+		m.cursor = min(m.cursor, max(0, len(m.repositoryListRows())-1))
+	}
 }
 
-func (m model) selectedRepositoryIndex() int {
-	indexes := m.repositoryIndexes()
-	if len(indexes) == 0 {
-		return -1
+func (m *model) savePreferences() {
+	if err := saveConfig(config{MDSFolder: m.path, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle}); err != nil {
+		m.err = fmt.Errorf("save preferences: %w", err)
 	}
-	return indexes[min(m.cursor, len(indexes)-1)]
 }
 
-func (m model) repositoryCursor(repository string) int {
-	for cursor, index := range m.repositoryIndexes() {
-		if m.repositories[index] == repository {
+func (m model) rowCursorForRepository(repository string) int {
+	for cursor, row := range m.repositoryListRows() {
+		if !row.header && m.repositories[row.index] == repository {
 			return cursor
 		}
 	}
@@ -262,47 +314,43 @@ func (m model) repositoryCursor(repository string) int {
 }
 
 func (m model) repositoryListRows() []repositoryListRow {
-	indexes := m.repositoryIndexes()
-	favoriteCount := 0
-	for _, index := range indexes {
-		if !m.favorites[m.repositories[index]] {
-			break
+	favorites, regular := []int{}, []int{}
+	for index, repository := range m.repositories {
+		if m.favorites[repository] {
+			favorites = append(favorites, index)
+		} else {
+			regular = append(regular, index)
 		}
-		favoriteCount++
 	}
-	favorites := indexes[:favoriteCount]
-	regular := indexes[favoriteCount:]
-
-	rows := make([]repositoryListRow, 0, len(m.repositories)+len(favorites)+2)
+	rows := []repositoryListRow{}
 	if len(favorites) > 0 {
-		rows = append(rows, repositoryListRow{group: "FAVORITES", index: -1})
-		rows = appendGroupedRepositoryRows(rows, m.repositories, favorites)
+		rows = append(rows, repositoryListRow{group: m.favoritesDisplayTitle(), key: "favorites", header: true})
+		if !m.collapsed["favorites"] {
+			rows = appendGroupedRepositoryRows(rows, m.repositories, favorites, "favorite:", m.collapsed)
+		}
 	}
-	return appendGroupedRepositoryRows(rows, m.repositories, regular)
+	return appendGroupedRepositoryRows(rows, m.repositories, regular, "group:", m.collapsed)
 }
 
-func appendGroupedRepositoryRows(rows []repositoryListRow, repositories []string, indexes []int) []repositoryListRow {
+func appendGroupedRepositoryRows(rows []repositoryListRow, repositories []string, indexes []int, prefix string, collapsed map[string]bool) []repositoryListRow {
 	previousGroup := ""
 	for _, index := range indexes {
 		group, name := repositoryGroup(repositories[index])
+		key := prefix + group
 		if group != previousGroup {
-			rows = append(rows, repositoryListRow{group: group, index: -1})
+			rows = append(rows, repositoryListRow{group: group, key: key, header: true})
 			previousGroup = group
 		}
-		rows = append(rows, repositoryListRow{repository: name, index: index})
+		if !collapsed[key] {
+			rows = append(rows, repositoryListRow{repository: name, index: index})
+		}
 	}
 	return rows
 }
 
 func (m model) repositoryWindow(rows []repositoryListRow) (int, int) {
 	visible := max(1, m.contentHeight()-6)
-	cursorRow := 0
-	for index, row := range rows {
-		if row.index == m.selectedRepositoryIndex() {
-			cursorRow = index
-			break
-		}
-	}
+	cursorRow := min(m.cursor, max(0, len(rows)-1))
 	start := max(0, cursorRow-visible+1)
 	end := min(len(rows), start+visible)
 	if end-start < visible {
@@ -421,6 +469,9 @@ func loadConfig() (config, error) {
 	}
 	if stored.Favorites == nil {
 		stored.Favorites = make(map[string]bool)
+	}
+	if stored.Collapsed == nil {
+		stored.Collapsed = make(map[string]bool)
 	}
 	return stored, nil
 }
