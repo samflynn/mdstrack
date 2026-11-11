@@ -88,6 +88,25 @@ func TestRepositoryCursorScrollsViewport(t *testing.T) {
 	}
 }
 
+func TestFavoritingMovesCursorToNextRepository(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := model{
+		mode:         repositoriesMode,
+		path:         "/tmp/mds",
+		repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one"},
+		favorites:    make(map[string]bool),
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.selectedRepositoryIndex(), 1; got != want {
+		t.Fatalf("selection after favoriting = %d, want %d", got, want)
+	}
+	if !strings.Contains(m.repositoriesView(), "▸ [ ] lab-two") {
+		t.Fatal("expected selection to advance to the next repository")
+	}
+}
+
 func TestFavoriteOrderingDrivesCursorNavigation(t *testing.T) {
 	m := model{
 		mode:         repositoriesMode,

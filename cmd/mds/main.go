@@ -104,12 +104,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.favorites = make(map[string]bool)
 					}
 					repository := m.repositories[indexes[m.cursor]]
+					nextRepository := repository
+					if m.cursor+1 < len(indexes) {
+						nextRepository = m.repositories[indexes[m.cursor+1]]
+					}
 					m.favorites[repository] = !m.favorites[repository]
 					if err := saveConfig(config{MDSFolder: m.path, Favorites: m.favorites}); err != nil {
 						m.favorites[repository] = !m.favorites[repository]
 						m.err = fmt.Errorf("save favorites: %w", err)
 					} else {
-						m.cursor = m.repositoryCursor(repository)
+						m.cursor = m.repositoryCursor(nextRepository)
 					}
 				}
 			}
