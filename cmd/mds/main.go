@@ -60,6 +60,7 @@ var (
 	promptStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
 	groupStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Italic(true)
+	favoriteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true).Bold(true)
 	cursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
 )
 
@@ -123,9 +124,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			rows := m.repositoryListRows()
 			switch msg.String() {
 			case "up", "k":
-				m.cursor = max(0, m.cursor-1)
+				m.cursor = m.moveCursor(rows, -1)
 			case "down", "j":
-				m.cursor = min(max(0, len(rows)-1), m.cursor+1)
+				m.cursor = m.moveCursor(rows, 1)
 			case "e":
 				if len(rows) > 0 && rows[m.cursor].key == "favorites" {
 					m.editingTitle, m.titleInput = true, m.favoritesDisplayTitle()
@@ -226,28 +227,38 @@ func (m model) repositoriesView() string {
 		start, end := m.repositoryWindow(rows)
 		for index, row := range rows[start:end] {
 			selected := start+index == m.cursor
+			if row.key == "divider" {
+				lines = append(lines, mutedStyle.Render(strings.Repeat("─", width)))
+				continue
+			}
+			indent := ""
+			if strings.HasPrefix(row.key, "favorite:") {
+				indent = "  "
+			}
 			if row.header {
 				prefix := "⌄ "
 				if m.collapsed[row.key] {
 					prefix = "› "
 				}
-				label := prefix + truncate(row.group, width-3)
+				label := indent + prefix + truncate(strings.ToUpper(row.group), width-len(indent)-3)
 				if selected {
 					lines = append(lines, cursorStyle.Render("▸ "+label))
+				} else if row.key == "favorites" {
+					lines = append(lines, favoriteStyle.Render("★ "+label))
 				} else {
 					lines = append(lines, groupStyle.Render(label))
 				}
 				continue
 			}
-			name := truncate(row.repository, max(1, width-5))
+			name := truncate(row.repository, max(1, width-len(indent)-5))
 			marker := "[ ]"
 			if m.favorites[m.repositories[row.index]] {
 				marker = "[X]"
 			}
 			if selected {
-				lines = append(lines, cursorStyle.Render("▸ "+marker+" "+name))
+				lines = append(lines, cursorStyle.Render("▸ "+indent+marker+" "+name))
 			} else {
-				lines = append(lines, selectedStyle.Render(marker+" ")+name)
+				lines = append(lines, selectedStyle.Render(indent+marker+" ")+name)
 			}
 		}
 		if start > 0 || end < len(rows) {
@@ -264,12 +275,15 @@ func (m model) repositoriesView() string {
 
 func (m model) favoritesDisplayTitle() string {
 	if m.favoritesTitle == "" {
-		return "favorites"
+		return "FAVORITES"
 	}
-	return m.favoritesTitle + " (favorites)"
+	return strings.ToUpper(m.favoritesTitle) + " (FAVORITES)"
 }
 
 func (m *model) activateRow(row repositoryListRow) {
+	if row.key == "divider" {
+		return
+	}
 	if row.header {
 		if m.collapsed == nil {
 			m.collapsed = make(map[string]bool)
@@ -328,6 +342,9 @@ func (m model) repositoryListRows() []repositoryListRow {
 		if !m.collapsed["favorites"] {
 			rows = appendGroupedRepositoryRows(rows, m.repositories, favorites, "favorite:", m.collapsed)
 		}
+		if len(regular) > 0 {
+			rows = append(rows, repositoryListRow{key: "divider"})
+		}
 	}
 	return appendGroupedRepositoryRows(rows, m.repositories, regular, "group:", m.collapsed)
 }
@@ -342,10 +359,20 @@ func appendGroupedRepositoryRows(rows []repositoryListRow, repositories []string
 			previousGroup = group
 		}
 		if !collapsed[key] {
-			rows = append(rows, repositoryListRow{repository: name, index: index})
+			rows = append(rows, repositoryListRow{repository: name, index: index, key: prefix + "repository"})
 		}
 	}
 	return rows
+}
+
+func (m model) moveCursor(rows []repositoryListRow, direction int) int {
+	cursor := m.cursor
+	for candidate := cursor + direction; candidate >= 0 && candidate < len(rows); candidate += direction {
+		if rows[candidate].key != "divider" {
+			return candidate
+		}
+	}
+	return cursor
 }
 
 func (m model) repositoryWindow(rows []repositoryListRow) (int, int) {
