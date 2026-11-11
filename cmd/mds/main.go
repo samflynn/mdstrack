@@ -626,16 +626,15 @@ func (m model) repositoriesView() string {
 	if m.editingTitle {
 		lines = append(lines, "", promptStyle.Render("Rename tracking: "+truncate(m.titleInput, max(1, width-17))+"█"), mutedStyle.Render("Enter save · Esc cancel"))
 	}
-	if m.githubActions {
-		lines = append(lines, "", promptStyle.Render("GitHub actions"), "  o  Open GitHub URL in browser", "  c  Copy GitHub URL", mutedStyle.Render("Esc cancel"))
-	}
-	if m.actionStatus != "" {
-		lines = append(lines, "", mutedStyle.Render(truncate(m.actionStatus, width)))
-	}
 	if repository, err := m.firstCommitError(); err != nil {
 		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
 	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · f Finder · g GitHub · e rename tracking · s settings · q quit", len(m.repositories))
+	if m.githubActions {
+		footer = "GitHub actions · o open URL · c copy URL · Esc cancel"
+	} else if m.actionStatus != "" {
+		footer = m.actionStatus
+	}
 	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
 }

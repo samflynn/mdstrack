@@ -141,8 +141,8 @@ func TestGitHubActionsMenuOpensForSelectedRepository(t *testing.T) {
 	if !m.githubActions {
 		t.Fatal("expected g to open the GitHub actions menu for a repository")
 	}
-	if view := m.repositoriesView(); !strings.Contains(view, "GitHub actions") || !strings.Contains(view, "Copy GitHub URL") {
-		t.Fatalf("expected GitHub actions menu in view, got %q", view)
+	if view := m.repositoriesView(); !strings.Contains(view, "GitHub actions") || !strings.Contains(view, "o open URL") || strings.Contains(view, "Copy GitHub URL") {
+		t.Fatalf("expected compact GitHub actions footer in view, got %q", view)
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if updated.(model).githubActions {
