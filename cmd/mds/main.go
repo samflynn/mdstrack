@@ -25,6 +25,7 @@ type config struct {
 	GitHubUsername    string          `json:"github_username"`
 	GitHubProfileName string          `json:"github_profile_name"`
 	GitHubHost        string          `json:"github_host"`
+	DeadlineOverride  string          `json:"deadline_override,omitempty"`
 	Favorites         map[string]bool `json:"favorites"`
 	Collapsed         map[string]bool `json:"collapsed"`
 	FavoritesTitle    string          `json:"favorites_title"`
@@ -78,6 +79,7 @@ type model struct {
 	githubUsername     string
 	githubProfileName  string
 	githubHost         string
+	deadlineOverride   string
 	setupStep          int
 	settingsCursor     int
 	editingSetting     string
@@ -143,7 +145,7 @@ func newModel() (model, error) {
 	}
 
 	repositories, err := findRepositories(stored.MDSFolder)
-	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
+	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), deadlineOverride: stored.DeadlineOverride, repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
 }
 
 func (m model) Init() tea.Cmd {
@@ -397,6 +399,21 @@ func (m model) setupView() string {
 	return m.fullScreen(lines)
 }
 
+func (m model) effectiveDeadline(now time.Time) time.Time {
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	if m.deadlineOverride != "" {
+		override, err := time.ParseInLocation("2006-01-02", m.deadlineOverride, now.Location())
+		if err == nil && !override.Before(today) {
+			return override
+		}
+	}
+	return nextSaturday(today)
+}
+
+func nextSaturday(day time.Time) time.Time {
+	return day.AddDate(0, 0, (int(time.Saturday)-int(day.Weekday())+7)%7)
+}
+
 func (m model) settingsView() string {
 	width := m.contentWidth()
 	values := settingsValues(m)
@@ -509,7 +526,19 @@ func settingsValues(m model) []settingValue {
 		{key: "github", label: "GitHub username", value: m.githubUsername},
 		{key: "profile-name", label: "GitHub profile display name", value: m.githubProfileName},
 		{key: "host", label: "GitHub host", value: m.githubHost},
+		{key: "deadline", label: "Deadline", value: m.deadlineDisplayValue(time.Now())},
 	}
+}
+
+func (m model) deadlineDisplayValue(now time.Time) string {
+	value := m.effectiveDeadline(now).Format("2006-01-02")
+	if m.deadlineOverride != "" {
+		override, err := time.ParseInLocation("2006-01-02", m.deadlineOverride, now.Location())
+		if err == nil && !override.Before(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())) {
+			return value + " (override)"
+		}
+	}
+	return value + " (Saturday default)"
 }
 
 func (m model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -540,13 +569,16 @@ func (m model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		setting := settingsValues(m)[m.settingsCursor]
 		m.editingSetting, m.settingInput = setting.key, setting.value
+		if setting.key == "deadline" {
+			m.settingInput = m.deadlineOverride
+		}
 	}
 	return m, nil
 }
 
 func (m model) saveSetting() (tea.Model, tea.Cmd) {
 	value := strings.TrimSpace(m.settingInput)
-	if value == "" {
+	if value == "" && m.editingSetting != "deadline" {
 		m.err = errors.New("a setting cannot be empty")
 		return m, nil
 	}
@@ -575,6 +607,17 @@ func (m model) saveSetting() (tea.Model, tea.Cmd) {
 		m.githubUsername = value
 	} else if m.editingSetting == "profile-name" {
 		m.githubProfileName = value
+	} else if m.editingSetting == "deadline" {
+		if value != "" {
+			deadline, err := time.ParseInLocation("2006-01-02", value, time.Local)
+			if err != nil {
+				m.err = errors.New("deadline must use YYYY-MM-DD")
+				return m, nil
+			}
+			m.deadlineOverride = deadline.Format("2006-01-02")
+		} else {
+			m.deadlineOverride = ""
+		}
 	} else {
 		host := normalizeGitHubHost(value)
 		if host == "" {
@@ -803,7 +846,7 @@ func (m *model) activateRow(row repositoryListRow) (string, bool) {
 }
 
 func (m *model) savePreferences() {
-	if err := saveConfig(config{MDSFolder: m.path, GitHubUsername: m.githubUsername, GitHubProfileName: m.githubProfileName, GitHubHost: m.githubHost, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle}); err != nil {
+	if err := saveConfig(config{MDSFolder: m.path, GitHubUsername: m.githubUsername, GitHubProfileName: m.githubProfileName, GitHubHost: m.githubHost, DeadlineOverride: m.deadlineOverride, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle}); err != nil {
 		m.err = fmt.Errorf("save preferences: %w", err)
 	}
 }

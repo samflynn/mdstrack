@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -122,6 +123,49 @@ func TestSetupPromptsForProfileNameAndGitHubHost(t *testing.T) {
 	m.githubHost = defaultGitHubHost
 	if !strings.Contains(m.setupView(), "GitHub host:") {
 		t.Fatal("expected setup to request the GitHub host")
+	}
+}
+
+func TestDeadlineUsesOverrideUntilItPasses(t *testing.T) {
+	now := time.Date(2026, time.November, 11, 12, 0, 0, 0, time.UTC)
+	m := model{deadlineOverride: "2026-11-13"}
+	if got, want := m.effectiveDeadline(now).Format("2006-01-02"), "2026-11-13"; got != want {
+		t.Fatalf("override deadline = %s, want %s", got, want)
+	}
+	m.deadlineOverride = "2026-11-10"
+	if got, want := m.effectiveDeadline(now).Format("2006-01-02"), "2026-11-14"; got != want {
+		t.Fatalf("expired override deadline = %s, want next Saturday %s", got, want)
+	}
+}
+
+func TestSettingsSavesAndClearsDeadlineOverride(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := model{mode: settingsMode, path: t.TempDir(), githubUsername: "smudgal", githubProfileName: "Shrey Mudgal", githubHost: "github.ubc.ca", favorites: map[string]bool{}, collapsed: map[string]bool{}, settingsCursor: 4}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.editingSetting, "deadline"; got != want {
+		t.Fatalf("editing setting = %q, want %q", got, want)
+	}
+	m.settingInput = "2026-11-13"
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.deadlineOverride, "2026-11-13"; got != want {
+		t.Fatalf("deadline override = %q, want %q", got, want)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	m.settingInput = ""
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.deadlineOverride != "" {
+		t.Fatalf("deadline override = %q, want cleared override", m.deadlineOverride)
+	}
+	stored, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.DeadlineOverride != "" {
+		t.Fatalf("stored deadline override = %q, want cleared override", stored.DeadlineOverride)
 	}
 }
 
