@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,16 +20,18 @@ const applicationName = "mds"
 const defaultGitHubHost = "github.ubc.ca"
 const commitGoal = 3
 const commitProgressWidth = 12
+const defaultRefreshIntervalMinutes = 5
 
 type config struct {
-	MDSFolder         string          `json:"mds_folder"`
-	GitHubUsername    string          `json:"github_username"`
-	GitHubProfileName string          `json:"github_profile_name"`
-	GitHubHost        string          `json:"github_host"`
-	DeadlineOverride  string          `json:"deadline_override,omitempty"`
-	Favorites         map[string]bool `json:"favorites"`
-	Collapsed         map[string]bool `json:"collapsed"`
-	FavoritesTitle    string          `json:"favorites_title"`
+	MDSFolder              string          `json:"mds_folder"`
+	GitHubUsername         string          `json:"github_username"`
+	GitHubProfileName      string          `json:"github_profile_name"`
+	GitHubHost             string          `json:"github_host"`
+	DeadlineOverride       string          `json:"deadline_override,omitempty"`
+	RefreshIntervalMinutes int             `json:"refresh_interval_minutes"`
+	Favorites              map[string]bool `json:"favorites"`
+	Collapsed              map[string]bool `json:"collapsed"`
+	FavoritesTitle         string          `json:"favorites_title"`
 }
 
 type mode int
@@ -47,6 +50,14 @@ type commitCountsMsg struct {
 }
 
 type commitSpinnerTickMsg struct{}
+
+type refreshTickMsg struct{}
+
+type workspaceRefreshMsg struct {
+	repositories []string
+	err          error
+	refreshedAt  time.Time
+}
 
 type repositoryActionMsg struct {
 	err error
@@ -80,45 +91,48 @@ type repositoryListRow struct {
 }
 
 type model struct {
-	mode               mode
-	path               string
-	githubUsername     string
-	githubProfileName  string
-	githubHost         string
-	deadlineOverride   string
-	setupStep          int
-	settingsCursor     int
-	editingSetting     string
-	settingInput       string
-	repositories       []string
-	favorites          map[string]bool
-	commitCounts       map[string]int
-	commitErrors       map[string]error
-	loadingCommits     bool
-	spinnerFrame       int
-	collapsed          map[string]bool
-	favoritesTitle     string
-	editingTitle       bool
-	titleInput         string
-	githubActions      bool
-	editorActions      bool
-	searchChooser      bool
-	localSearchActive  bool
-	localSearch        string
-	actionStatus       string
-	githubSearch       string
-	searchResults      []githubSearchRepository
-	searchCursor       int
-	searchLoading      bool
-	searchError        error
-	hideCloned         bool
-	clonedRepositories map[string]bool
-	cloneConfirmation  string
-	cloneStatus        string
-	cursor             int
-	err                error
-	width              int
-	height             int
+	mode                   mode
+	path                   string
+	githubUsername         string
+	githubProfileName      string
+	githubHost             string
+	deadlineOverride       string
+	refreshIntervalMinutes int
+	lastRefresh            time.Time
+	nextRefresh            time.Time
+	setupStep              int
+	settingsCursor         int
+	editingSetting         string
+	settingInput           string
+	repositories           []string
+	favorites              map[string]bool
+	commitCounts           map[string]int
+	commitErrors           map[string]error
+	loadingCommits         bool
+	spinnerFrame           int
+	collapsed              map[string]bool
+	favoritesTitle         string
+	editingTitle           bool
+	titleInput             string
+	githubActions          bool
+	editorActions          bool
+	searchChooser          bool
+	localSearchActive      bool
+	localSearch            string
+	actionStatus           string
+	githubSearch           string
+	searchResults          []githubSearchRepository
+	searchCursor           int
+	searchLoading          bool
+	searchError            error
+	hideCloned             bool
+	clonedRepositories     map[string]bool
+	cloneConfirmation      string
+	cloneStatus            string
+	cursor                 int
+	err                    error
+	width                  int
+	height                 int
 }
 
 var (
@@ -157,14 +171,16 @@ func newModel() (model, error) {
 	}
 
 	repositories, err := findRepositories(stored.MDSFolder)
-	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), deadlineOverride: stored.DeadlineOverride, repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
+	now := time.Now()
+	refreshInterval := configuredRefreshInterval(stored.RefreshIntervalMinutes)
+	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), deadlineOverride: stored.DeadlineOverride, refreshIntervalMinutes: refreshInterval, lastRefresh: now, nextRefresh: now.Add(time.Duration(refreshInterval) * time.Minute), repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
 }
 
 func (m model) Init() tea.Cmd {
 	if m.mode != repositoriesMode {
 		return nil
 	}
-	return tea.Batch(loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), nextCommitSpinnerTick())
+	return tea.Batch(loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), nextCommitSpinnerTick(), nextRefreshTick())
 }
 
 func (m *model) startCommitCountLoad(repositories []string) tea.Cmd {
@@ -182,6 +198,19 @@ func hasTrackedRepositories(favorites map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+func nextRefreshTick() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return refreshTickMsg{}
+	})
+}
+
+func (m model) refreshWorkspace() tea.Cmd {
+	return func() tea.Msg {
+		repositories, err := findRepositories(m.path)
+		return workspaceRefreshMsg{repositories: repositories, err: err, refreshedAt: time.Now()}
+	}
 }
 
 func nextCommitSpinnerTick() tea.Cmd {
@@ -211,6 +240,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(commitSpinnerFrames)
 			return m, nextCommitSpinnerTick()
 		}
+	case refreshTickMsg:
+		if m.mode == repositoriesMode && !m.nextRefresh.After(time.Now()) {
+			return m, m.refreshWorkspace()
+		}
+		return m, nextRefreshTick()
+	case workspaceRefreshMsg:
+		m.lastRefresh = msg.refreshedAt
+		m.nextRefresh = msg.refreshedAt.Add(time.Duration(m.refreshIntervalMinutes) * time.Minute)
+		if msg.err != nil {
+			m.err = fmt.Errorf("refresh repositories: %w", msg.err)
+			return m, nextRefreshTick()
+		}
+		m.repositories, m.err = msg.repositories, nil
+		return m, tea.Batch(loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), findClonedRepositories(m.path, m.repositories, m.githubHost), nextRefreshTick())
 	case repositoryActionMsg:
 		if msg.err != nil {
 			m.actionStatus = "Action failed: " + msg.err.Error()
@@ -401,12 +444,13 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 		m.err = errors.New("enter your GitHub host")
 		return m, nil
 	}
-	if err := saveConfig(config{MDSFolder: folder, GitHubUsername: username, GitHubProfileName: profileName, GitHubHost: host, Favorites: make(map[string]bool), Collapsed: make(map[string]bool)}); err != nil {
+	if err := saveConfig(config{MDSFolder: folder, GitHubUsername: username, GitHubProfileName: profileName, GitHubHost: host, RefreshIntervalMinutes: defaultRefreshIntervalMinutes, Favorites: make(map[string]bool), Collapsed: make(map[string]bool)}); err != nil {
 		m.err = fmt.Errorf("save configuration: %w", err)
 		return m, nil
 	}
 	repositories, err := findRepositories(folder)
-	m.mode, m.path, m.githubUsername, m.githubProfileName, m.githubHost, m.repositories, m.favorites, m.collapsed, m.err = repositoriesMode, folder, username, profileName, host, repositories, make(map[string]bool), make(map[string]bool), err
+	now := time.Now()
+	m.mode, m.path, m.githubUsername, m.githubProfileName, m.githubHost, m.refreshIntervalMinutes, m.lastRefresh, m.nextRefresh, m.repositories, m.favorites, m.collapsed, m.err = repositoriesMode, folder, username, profileName, host, defaultRefreshIntervalMinutes, now, now.Add(defaultRefreshIntervalMinutes*time.Minute), repositories, make(map[string]bool), make(map[string]bool), err
 	return m, nil
 }
 
@@ -591,6 +635,7 @@ func settingsValues(m model) []settingValue {
 		{key: "profile-name", label: "GitHub profile display name", value: m.githubProfileName},
 		{key: "host", label: "GitHub host", value: m.githubHost},
 		{key: "deadline", label: "Deadline", value: m.deadlineDisplayValue(time.Now())},
+		{key: "refresh-interval", label: "Refresh interval", value: fmt.Sprintf("%d minutes", m.refreshIntervalMinutes)},
 	}
 }
 
@@ -635,6 +680,8 @@ func (m model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editingSetting, m.settingInput = setting.key, setting.value
 		if setting.key == "deadline" {
 			m.settingInput = m.deadlineOverride
+		} else if setting.key == "refresh-interval" {
+			m.settingInput = fmt.Sprintf("%d", m.refreshIntervalMinutes)
 		}
 	}
 	return m, nil
@@ -682,6 +729,14 @@ func (m model) saveSetting() (tea.Model, tea.Cmd) {
 		} else {
 			m.deadlineOverride = ""
 		}
+	} else if m.editingSetting == "refresh-interval" {
+		interval, err := parseRefreshInterval(value)
+		if err != nil {
+			m.err = err
+			return m, nil
+		}
+		m.refreshIntervalMinutes = interval
+		m.nextRefresh = time.Now().Add(time.Duration(interval) * time.Minute)
 	} else {
 		host := normalizeGitHubHost(value)
 		if host == "" {
@@ -908,6 +963,11 @@ func (m model) repositoriesView() string {
 	} else if m.actionStatus != "" {
 		footer = m.actionStatus
 	}
+	if !m.searchChooser && !m.editorActions && !m.githubActions && !m.localSearchActive && m.actionStatus == "" {
+		status := m.refreshStatus(time.Now())
+		footerWidth := max(1, width-lipgloss.Width(status)-2)
+		footer = truncate(footer, footerWidth) + strings.Repeat(" ", max(1, width-lipgloss.Width(truncate(footer, footerWidth))-lipgloss.Width(status))) + status
+	}
 	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
 }
@@ -967,7 +1027,7 @@ func (m *model) activateRow(row repositoryListRow) (string, bool) {
 }
 
 func (m *model) savePreferences() {
-	if err := saveConfig(config{MDSFolder: m.path, GitHubUsername: m.githubUsername, GitHubProfileName: m.githubProfileName, GitHubHost: m.githubHost, DeadlineOverride: m.deadlineOverride, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle}); err != nil {
+	if err := saveConfig(config{MDSFolder: m.path, GitHubUsername: m.githubUsername, GitHubProfileName: m.githubProfileName, GitHubHost: m.githubHost, DeadlineOverride: m.deadlineOverride, RefreshIntervalMinutes: m.refreshIntervalMinutes, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle}); err != nil {
 		m.err = fmt.Errorf("save preferences: %w", err)
 	}
 }
@@ -1373,6 +1433,29 @@ func loadConfig() (config, error) {
 	}
 	stored.GitHubHost = configuredGitHubHost(stored.GitHubHost)
 	return stored, nil
+}
+
+func configuredRefreshInterval(interval int) int {
+	if interval > 0 {
+		return interval
+	}
+	return defaultRefreshIntervalMinutes
+}
+
+func parseRefreshInterval(value string) (int, error) {
+	interval, err := strconv.Atoi(value)
+	if err != nil || interval <= 0 {
+		return 0, errors.New("refresh interval must be a positive number of minutes")
+	}
+	return interval, nil
+}
+
+func (m model) refreshStatus(now time.Time) string {
+	if m.lastRefresh.IsZero() || m.nextRefresh.IsZero() {
+		return "Refresh pending"
+	}
+	remaining := max(0, int(m.nextRefresh.Sub(now).Seconds()))
+	return fmt.Sprintf("Last refresh %s · Next refresh in %dm %02ds", m.lastRefresh.Format("15:04"), remaining/60, remaining%60)
 }
 
 func configuredGitHubHost(host string) string {

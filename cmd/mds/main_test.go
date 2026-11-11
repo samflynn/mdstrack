@@ -126,6 +126,30 @@ func TestSetupPromptsForProfileNameAndGitHubHost(t *testing.T) {
 	}
 }
 
+func TestRefreshIntervalSettingAndStatus(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	now := time.Date(2026, time.November, 11, 12, 0, 0, 0, time.UTC)
+	m := model{mode: settingsMode, path: t.TempDir(), githubUsername: "smudgal", githubProfileName: "Shrey Mudgal", githubHost: "github.ubc.ca", refreshIntervalMinutes: defaultRefreshIntervalMinutes, favorites: map[string]bool{}, collapsed: map[string]bool{}, settingsCursor: 5, lastRefresh: now, nextRefresh: now.Add(5 * time.Minute)}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.editingSetting, "refresh-interval"; got != want {
+		t.Fatalf("editing setting = %q, want %q", got, want)
+	}
+	m.settingInput = "10"
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.refreshIntervalMinutes, 10; got != want {
+		t.Fatalf("refresh interval = %d, want %d", got, want)
+	}
+	m.lastRefresh, m.nextRefresh = now, now.Add(10*time.Minute)
+	if got := m.refreshStatus(now); !strings.Contains(got, "Last refresh 12:00") || !strings.Contains(got, "Next refresh in 10m 00s") {
+		t.Fatalf("refresh status = %q", got)
+	}
+	if _, err := parseRefreshInterval("0"); err == nil {
+		t.Fatal("expected zero refresh interval to be rejected")
+	}
+}
+
 func TestDeadlineUsesOverrideUntilItPasses(t *testing.T) {
 	now := time.Date(2026, time.November, 11, 12, 0, 0, 0, time.UTC)
 	m := model{deadlineOverride: "2026-11-13"}
@@ -195,8 +219,9 @@ func TestTrackedRepositoryRendersCommitError(t *testing.T) {
 }
 
 func TestRepositoryFooterIncludesSearchShortcut(t *testing.T) {
-	m := model{mode: repositoriesMode, width: 100, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
-	if view := m.repositoriesView(); !strings.Contains(view, "/ search") {
+	now := time.Now()
+	m := model{mode: repositoriesMode, width: 100, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}, lastRefresh: now, nextRefresh: now.Add(5 * time.Minute)}
+	if view := m.repositoriesView(); !strings.Contains(view, "/ search") || !strings.Contains(view, "Last refresh") || !strings.Contains(view, "Next refresh in") {
 		t.Fatalf("expected repository footer to include search shortcut, got %q", view)
 	}
 }
