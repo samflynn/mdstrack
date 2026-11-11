@@ -299,7 +299,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(rows) > 0 && rows[m.cursor].key == "favorites" {
 					m.editingTitle, m.titleInput = true, m.favoritesDisplayTitle()
 				}
-			case "f":
+			case "o":
 				if _, ok := m.selectedRepository(rows); ok {
 					m.editorActions, m.actionStatus = true, ""
 				}
@@ -720,13 +720,18 @@ func (m model) updateEditorActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editorActions = false
 		return m, nil
 	}
-	applications := map[string]string{"v": "Visual Studio Code", "p": "Positron", "r": "RStudio"}
+	path := filepath.Join(m.path, repository)
+	if msg.String() == "f" {
+		m.editorActions = false
+		return m, runRepositoryAction("open", path)
+	}
+	applications := map[string]string{"v": "Visual Studio Code", "p": "Positron"}
 	application, ok := applications[msg.String()]
 	if !ok {
 		return m, nil
 	}
 	m.editorActions = false
-	return m, openInApplication(application, filepath.Join(m.path, repository))
+	return m, openInApplication(application, path)
 }
 
 func (m model) updateGitHubActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -881,14 +886,14 @@ func (m model) repositoriesView() string {
 	if repository, err := m.firstCommitError(); err != nil {
 		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
-	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · / search · f editor · g GitHub · e rename tracking · s settings · q quit", len(m.repositories))
+	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · / search · o open · g GitHub · e rename tracking · s settings · q quit", len(m.repositories))
 	if m.localSearchActive {
 		footer = "/ " + m.localSearch + "█ · ↑/↓ move · Enter track · Esc clear search"
 	}
 	if m.searchChooser {
 		footer = "Search · l local workspace · g GitHub repositories · Esc cancel"
 	} else if m.editorActions {
-		footer = "Open in editor · v VS Code · p Positron · r RStudio · Esc cancel"
+		footer = "Open · v VS Code · p Positron · f Finder · Esc cancel"
 	} else if m.githubActions {
 		footer = "GitHub actions · o open URL · c copy URL · Esc cancel"
 	} else if m.actionStatus != "" {

@@ -212,12 +212,12 @@ func TestEditorActionsMenuOpensForSelectedRepository(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = updated.(model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
 	m = updated.(model)
 	if !m.editorActions {
-		t.Fatal("expected f to open editor actions")
+		t.Fatal("expected o to open editor actions")
 	}
-	if view := m.repositoriesView(); !strings.Contains(view, "v VS Code") || !strings.Contains(view, "p Positron") || !strings.Contains(view, "r RStudio") || lipgloss.Height(view) != m.viewportHeight() {
+	if view := m.repositoriesView(); !strings.Contains(view, "v VS Code") || !strings.Contains(view, "p Positron") || !strings.Contains(view, "f Finder") || strings.Contains(view, "RStudio") || lipgloss.Height(view) != m.viewportHeight() {
 		t.Fatalf("expected terminal-safe editor actions footer, got %q", view)
 	}
 }
