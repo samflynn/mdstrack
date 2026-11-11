@@ -148,6 +148,21 @@ func TestGitHubCommitCountMatchesLoginOrDisplayName(t *testing.T) {
 	}
 }
 
+func TestTrackedRepositoryRendersLoadingSpinner(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{}, commitErrors: map[string]error{}, loadingCommits: true, collapsed: map[string]bool{}}
+	if !strings.Contains(m.repositoriesView(), "Loading") {
+		t.Fatal("expected tracked repository to render a loading indicator")
+	}
+	updated, _ := m.Update(commitCountsMsg{counts: map[string]int{"511/lab-one": 0}, errors: map[string]error{}})
+	m = updated.(model)
+	if m.loadingCommits {
+		t.Fatal("expected completed commit lookup to stop loading")
+	}
+	if strings.Contains(m.repositoriesView(), "Loading") {
+		t.Fatal("expected completed commit lookup to remove the loading indicator")
+	}
+}
+
 func TestTrackedRepositoryRendersCommitCount(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{"511/lab-one": 14}, collapsed: map[string]bool{}}
 	if !strings.Contains(m.repositoriesView(), "14 commits") {

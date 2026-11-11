@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -40,6 +41,8 @@ type commitCountsMsg struct {
 	errors map[string]error
 }
 
+type commitSpinnerTickMsg struct{}
+
 type repositoryListRow struct {
 	group      string
 	repository string
@@ -62,6 +65,8 @@ type model struct {
 	favorites         map[string]bool
 	commitCounts      map[string]int
 	commitErrors      map[string]error
+	loadingCommits    bool
+	spinnerFrame      int
 	collapsed         map[string]bool
 	favoritesTitle    string
 	editingTitle      bool
@@ -73,15 +78,16 @@ type model struct {
 }
 
 var (
-	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
-	mutedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	borderStyle   = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
-	promptStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
-	groupStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Italic(true)
-	favoriteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true).Bold(true)
-	cursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
+	titleStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
+	mutedStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	errorStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	borderStyle         = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
+	promptStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+	selectedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
+	groupStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Italic(true)
+	favoriteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true).Bold(true)
+	cursorStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
+	commitSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 )
 
 func main() {
@@ -107,14 +113,39 @@ func newModel() (model, error) {
 	}
 
 	repositories, err := findRepositories(stored.MDSFolder)
-	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
+	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
 }
 
 func (m model) Init() tea.Cmd {
 	if m.mode != repositoriesMode {
 		return nil
 	}
-	return loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost)
+	return tea.Batch(loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), nextCommitSpinnerTick())
+}
+
+func (m *model) startCommitCountLoad() tea.Cmd {
+	m.commitCounts = make(map[string]int)
+	m.commitErrors = make(map[string]error)
+	m.loadingCommits = hasTrackedRepositories(m.favorites)
+	if !m.loadingCommits {
+		return nil
+	}
+	return tea.Batch(loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), nextCommitSpinnerTick())
+}
+
+func hasTrackedRepositories(favorites map[string]bool) bool {
+	for _, tracked := range favorites {
+		if tracked {
+			return true
+		}
+	}
+	return false
+}
+
+func nextCommitSpinnerTick() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+		return commitSpinnerTickMsg{}
+	})
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -123,6 +154,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case commitCountsMsg:
 		m.commitCounts, m.commitErrors = msg.counts, msg.errors
+		m.loadingCommits = false
+	case commitSpinnerTickMsg:
+		if m.loadingCommits {
+			m.spinnerFrame = (m.spinnerFrame + 1) % len(commitSpinnerFrames)
+			return m, nextCommitSpinnerTick()
+		}
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.mode != setupMode && !m.editingTitle && m.editingSetting == "") {
 			return m, tea.Quit
@@ -166,7 +203,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if len(rows) > 0 {
 					m.activateRow(rows[m.cursor])
-					return m, loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost)
+					return m, m.startCommitCountLoad()
 				}
 			}
 			return m, nil
@@ -457,6 +494,8 @@ func (m model) repositoriesView() string {
 					countText = fmt.Sprintf("%d commits", count)
 				} else if m.commitErrors[m.repositories[row.index]] != nil {
 					countText = "GH ERROR"
+				} else if m.loadingCommits {
+					countText = commitSpinnerFrames[m.spinnerFrame] + " Loading"
 				}
 			}
 			prefix := indent + marker + " "
