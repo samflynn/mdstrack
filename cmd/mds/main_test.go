@@ -276,7 +276,7 @@ func TestSearchOpensAndFiltersAccessibleRepositories(t *testing.T) {
 
 func TestSearchCloneRequiresConfirmation(t *testing.T) {
 	m := model{mode: searchMode, width: 80, height: 20, searchResults: []githubSearchRepository{{FullName: "mds-2026-27/DSCI_511_lab1"}}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
 	if got, want := m.cloneConfirmation, "mds-2026-27/DSCI_511_lab1"; got != want {
 		t.Fatalf("clone confirmation = %q, want %q", got, want)

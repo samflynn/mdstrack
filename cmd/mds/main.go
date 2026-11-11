@@ -486,7 +486,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "h":
 		m.hideCloned = !m.hideCloned
 		m.searchCursor = 0
-	case "c":
+	case "enter":
 		results := m.filteredSearchResults()
 		if m.searchCursor < len(results) {
 			m.cloneConfirmation, m.cloneStatus = results[m.searchCursor].FullName, ""
@@ -531,7 +531,7 @@ func (m model) searchView() string {
 	if m.hideCloned {
 		hideClonedLabel = "h show cloned"
 	}
-	footer := "Type to filter · ↑/↓ move · c clone · " + hideClonedLabel + " · Esc back · q quit"
+	footer := "Type to filter · ↑/↓ move · Enter clone · " + hideClonedLabel + " · Esc back · q quit"
 	if m.cloneConfirmation != "" {
 		footer = "Clone " + m.cloneConfirmation + " into workspace? y yes · n no"
 	} else if m.cloneStatus != "" {
