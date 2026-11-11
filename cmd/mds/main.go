@@ -181,7 +181,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.titleInput = m.titleInput[:len(m.titleInput)-1]
 					}
 				default:
-					if msg.Type == tea.KeyRunes {
+					if isTextInputKey(msg) {
 						m.titleInput += string(msg.Runes)
 					}
 				}
@@ -225,7 +225,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.githubHost = removeLastRune(m.githubHost)
 			}
 		default:
-			if msg.Type == tea.KeyRunes {
+			if isTextInputKey(msg) {
 				switch m.setupStep {
 				case 0:
 					m.path += string(msg.Runes)
@@ -381,7 +381,7 @@ func (m model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.settingInput = m.settingInput[:len(m.settingInput)-1]
 			}
 		default:
-			if msg.Type == tea.KeyRunes {
+			if isTextInputKey(msg) {
 				m.settingInput += string(msg.Runes)
 			}
 		}
@@ -908,6 +908,10 @@ func removeLastRune(value string) string {
 		return value
 	}
 	return string(runes[:len(runes)-1])
+}
+
+func isTextInputKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace
 }
 
 func saveConfig(stored config) error {

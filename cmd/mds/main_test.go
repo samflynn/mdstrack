@@ -74,7 +74,18 @@ func TestSettingsUpdatesGitHubProfileNameAndHost(t *testing.T) {
 	if got, want := m.editingSetting, "profile-name"; got != want {
 		t.Fatalf("editing setting = %q, want %q", got, want)
 	}
-	m.settingInput = "Shrey Mudgal"
+	m.settingInput = ""
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune("Shrey")},
+		{Type: tea.KeySpace, Runes: []rune{' '}},
+		{Type: tea.KeyRunes, Runes: []rune("Mudgal")},
+	} {
+		updated, _ = m.Update(key)
+		m = updated.(model)
+	}
+	if got, want := m.settingInput, "Shrey Mudgal"; got != want {
+		t.Fatalf("typed profile display name = %q, want %q", got, want)
+	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
 	m.settingsCursor = 3
