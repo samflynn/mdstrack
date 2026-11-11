@@ -17,6 +17,8 @@ import (
 
 const applicationName = "mds"
 const defaultGitHubHost = "github.ubc.ca"
+const commitGoal = 3
+const commitProgressWidth = 12
 
 type config struct {
 	MDSFolder         string          `json:"mds_folder"`
@@ -500,11 +502,14 @@ func (m model) repositoriesView() string {
 				marker = "[X]"
 			}
 			countText := ""
+			nameStyle := lipgloss.NewStyle()
 			if m.favorites[m.repositories[row.index]] {
 				if count, ok := m.commitCounts[m.repositories[row.index]]; ok {
 					countText = commitProgress(count)
+					nameStyle = commitProgressStyle(count)
 				} else if m.commitErrors[m.repositories[row.index]] != nil {
 					countText = "GH ERROR"
+					nameStyle = errorStyle
 				} else if m.loadingCommits {
 					countText = commitSpinnerFrames[m.spinnerFrame] + " Loading"
 				}
@@ -515,15 +520,15 @@ func (m model) repositoriesView() string {
 			}
 			available := width - lipgloss.Width(prefix) - lipgloss.Width(countText)
 			name := truncate(row.repository, max(1, available-1))
-			rowText := prefix + name
+			prefixText := selectedStyle.Render(prefix)
+			if selected {
+				prefixText = cursorStyle.Render(prefix)
+			}
+			rowText := prefixText + nameStyle.Render(name)
 			if countText != "" {
 				rowText += strings.Repeat(" ", max(1, width-lipgloss.Width(rowText)-lipgloss.Width(countText))) + countText
 			}
-			if selected {
-				lines = append(lines, cursorStyle.Render(rowText))
-			} else {
-				lines = append(lines, selectedStyle.Render(prefix)+name+mutedStyle.Render(strings.TrimPrefix(rowText, prefix+name)))
-			}
+			lines = append(lines, rowText)
 		}
 		if start > 0 || end < len(rows) {
 			lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", start+1, end, len(rows))))
@@ -729,17 +734,18 @@ func truncateLeft(value string, width int) string {
 }
 
 func commitProgress(count int) string {
-	return fmt.Sprintf("%d/3 %s", count, commitProgressStyle(count).Render(commitProgressBar(count)))
+	style := commitProgressStyle(count)
+	return style.Render(commitProgressBar(count)) + " " + style.Render(fmt.Sprintf("%d/%d", count, commitGoal))
 }
 
 func commitProgressBar(count int) string {
-	filled := min(max(count, 0), 3)
-	return strings.Repeat("█", filled) + strings.Repeat("░", 3-filled)
+	filled := min(max(count, 0), commitGoal) * commitProgressWidth / commitGoal
+	return strings.Repeat("█", filled) + strings.Repeat("░", commitProgressWidth-filled)
 }
 
 func commitProgressStyle(count int) lipgloss.Style {
 	switch {
-	case count >= 3:
+	case count >= commitGoal:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
 	case count == 2:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
