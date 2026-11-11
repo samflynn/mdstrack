@@ -101,6 +101,10 @@ type model struct {
 	editingTitle       bool
 	titleInput         string
 	githubActions      bool
+	editorActions      bool
+	searchChooser      bool
+	localSearchActive  bool
+	localSearch        string
 	actionStatus       string
 	githubSearch       string
 	searchResults      []githubSearchRepository
@@ -237,8 +241,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSearch(msg)
 		}
 		if m.mode == repositoriesMode {
+			if m.searchChooser {
+				return m.updateSearchChooser(msg)
+			}
+			if m.editorActions {
+				return m.updateEditorActions(msg)
+			}
 			if m.githubActions {
 				return m.updateGitHubActions(msg)
+			}
+			if m.localSearchActive {
+				switch msg.String() {
+				case "esc":
+					m.localSearch, m.localSearchActive, m.cursor = "", false, 0
+					return m, nil
+				case "backspace", "ctrl+h":
+					m.localSearch, m.cursor = removeLastRune(m.localSearch), 0
+					return m, nil
+				default:
+					if isTextInputKey(msg) {
+						m.localSearch, m.cursor = m.localSearch+string(msg.Runes), 0
+						return m, nil
+					}
+				}
 			}
 			if m.editingTitle {
 				switch msg.String() {
@@ -263,9 +288,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			rows := m.repositoryListRows()
 			switch msg.String() {
 			case "/":
-				m.mode, m.githubSearch, m.searchCursor, m.searchError = searchMode, "", 0, nil
-				m.hideCloned, m.searchLoading = true, true
-				return m, tea.Batch(loadGitHubRepositories(m.githubHost), findClonedRepositories(m.path, m.repositories, m.githubHost))
+				m.searchChooser, m.actionStatus = true, ""
 			case "s":
 				m.mode, m.err = settingsMode, nil
 			case "up", "k":
@@ -277,8 +300,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.editingTitle, m.titleInput = true, m.favoritesDisplayTitle()
 				}
 			case "f":
-				if repository, ok := m.selectedRepository(rows); ok {
-					return m, openInFinder(filepath.Join(m.path, repository))
+				if _, ok := m.selectedRepository(rows); ok {
+					m.editorActions, m.actionStatus = true, ""
 				}
 			case "g":
 				if _, ok := m.selectedRepository(rows); ok {
@@ -672,6 +695,40 @@ func (m model) saveSetting() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateSearchChooser(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.searchChooser = false
+	case "l":
+		m.searchChooser, m.localSearchActive, m.localSearch, m.cursor = false, true, "", 0
+	case "g":
+		m.searchChooser = false
+		m.mode, m.githubSearch, m.searchCursor, m.searchError = searchMode, "", 0, nil
+		m.hideCloned, m.searchLoading = true, true
+		return m, tea.Batch(loadGitHubRepositories(m.githubHost), findClonedRepositories(m.path, m.repositories, m.githubHost))
+	}
+	return m, nil
+}
+
+func (m model) updateEditorActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" {
+		m.editorActions = false
+		return m, nil
+	}
+	repository, ok := m.selectedRepository(m.repositoryListRows())
+	if !ok {
+		m.editorActions = false
+		return m, nil
+	}
+	applications := map[string]string{"v": "Visual Studio Code", "p": "Positron", "r": "RStudio"}
+	application, ok := applications[msg.String()]
+	if !ok {
+		return m, nil
+	}
+	m.editorActions = false
+	return m, openInApplication(application, filepath.Join(m.path, repository))
+}
+
 func (m model) updateGitHubActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "esc" {
 		m.githubActions = false
@@ -718,8 +775,10 @@ func (m model) githubURL(repository string) (string, error) {
 	return fmt.Sprintf("https://%s/%s/%s", host, owner, name), nil
 }
 
-func openInFinder(path string) tea.Cmd {
-	return runRepositoryAction("open", path)
+func openInApplication(application, path string) tea.Cmd {
+	return func() tea.Msg {
+		return repositoryActionMsg{err: exec.Command("open", "-a", application, path).Run()}
+	}
 }
 
 func openURL(url string) tea.Cmd {
@@ -822,8 +881,15 @@ func (m model) repositoriesView() string {
 	if repository, err := m.firstCommitError(); err != nil {
 		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
-	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · / search · f Finder · g GitHub · e rename tracking · s settings · q quit", len(m.repositories))
-	if m.githubActions {
+	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · / search · f editor · g GitHub · e rename tracking · s settings · q quit", len(m.repositories))
+	if m.localSearchActive {
+		footer = "/ " + m.localSearch + "█ · ↑/↓ move · Enter track · Esc clear search"
+	}
+	if m.searchChooser {
+		footer = "Search · l local workspace · g GitHub repositories · Esc cancel"
+	} else if m.editorActions {
+		footer = "Open in editor · v VS Code · p Positron · r RStudio · Esc cancel"
+	} else if m.githubActions {
 		footer = "GitHub actions · o open URL · c copy URL · Esc cancel"
 	} else if m.actionStatus != "" {
 		footer = m.actionStatus
@@ -904,6 +970,9 @@ func (m model) rowCursorForRepository(repository string) int {
 func (m model) repositoryListRows() []repositoryListRow {
 	favorites, regular := []int{}, []int{}
 	for index, repository := range m.repositories {
+		if m.localSearch != "" && !strings.Contains(strings.ToLower(repository), strings.ToLower(m.localSearch)) {
+			continue
+		}
 		if m.favorites[repository] {
 			favorites = append(favorites, index)
 		} else {

@@ -184,6 +184,44 @@ func TestRepositoryFooterIncludesSearchShortcut(t *testing.T) {
 	}
 }
 
+func TestHomeSearchFiltersRepositoriesAndKeepsTrackingAction(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one", "511/worksheet-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updated.(model)
+	if !m.searchChooser {
+		t.Fatal("expected slash to open the search chooser")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("worksheet")})
+	m = updated.(model)
+	rows := m.repositoryListRows()
+	if !m.localSearchActive || len(rows) != 2 || rows[1].repository != "worksheet-one" {
+		t.Fatalf("local search rows = %#v, want worksheet repository only", rows)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if !m.favorites["511/worksheet-one"] {
+		t.Fatal("expected Enter in local search to track the selected repository")
+	}
+}
+
+func TestEditorActionsMenuOpensForSelectedRepository(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	m = updated.(model)
+	if !m.editorActions {
+		t.Fatal("expected f to open editor actions")
+	}
+	if view := m.repositoriesView(); !strings.Contains(view, "v VS Code") || !strings.Contains(view, "p Positron") || !strings.Contains(view, "r RStudio") || lipgloss.Height(view) != m.viewportHeight() {
+		t.Fatalf("expected terminal-safe editor actions footer, got %q", view)
+	}
+}
+
 func TestGitHubActionsMenuOpensForSelectedRepository(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -229,8 +267,10 @@ func TestSearchOpensAndFiltersAccessibleRepositories(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, githubHost: "github.ubc.ca", searchResults: []githubSearchRepository{{FullName: "mds-2026-27/DSCI_511_lab1"}, {FullName: "mds-2026-27/DSCI_521_lab0"}, {FullName: "other/course"}}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m = updated.(model)
 	if m.mode != searchMode || !m.searchLoading || !m.hideCloned {
-		t.Fatal("expected slash to open search with cloned repositories hidden by default")
+		t.Fatal("expected GitHub search choice to open search with cloned repositories hidden by default")
 	}
 	updated, _ = m.Update(githubSearchResultsMsg{repositories: m.searchResults})
 	m = updated.(model)
