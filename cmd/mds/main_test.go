@@ -116,7 +116,7 @@ func TestFavoritesTitleCanBeEditedAndPersists(t *testing.T) {
 	m.titleInput = "priority"
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
-	if got, want := m.favoritesDisplayTitle(), "PRIORITY (FAVORITES)"; got != want {
+	if got, want := m.favoritesDisplayTitle(), "PRIORITY (TRACKING)"; got != want {
 		t.Fatalf("favorites title = %q, want %q", got, want)
 	}
 	stored, err := loadConfig()

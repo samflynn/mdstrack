@@ -389,18 +389,18 @@ func (m model) repositoriesView() string {
 		}
 	}
 	if m.editingTitle {
-		lines = append(lines, "", promptStyle.Render("Rename favorites: "+truncate(m.titleInput, max(1, width-18))+"█"), mutedStyle.Render("Enter save · Esc cancel"))
+		lines = append(lines, "", promptStyle.Render("Rename tracking: "+truncate(m.titleInput, max(1, width-17))+"█"), mutedStyle.Render("Enter save · Esc cancel"))
 	}
-	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter act · e rename favorites · q quit", len(m.repositories))
+	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · e rename tracking · s settings · q quit", len(m.repositories))
 	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
 }
 
 func (m model) favoritesDisplayTitle() string {
 	if m.favoritesTitle == "" {
-		return "FAVORITES"
+		return "TRACKING"
 	}
-	return strings.ToUpper(m.favoritesTitle) + " (FAVORITES)"
+	return strings.ToUpper(m.favoritesTitle) + " (TRACKING)"
 }
 
 func (m *model) activateRow(row repositoryListRow) {
