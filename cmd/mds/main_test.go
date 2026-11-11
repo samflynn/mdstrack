@@ -88,6 +88,22 @@ func TestRepositoryCursorScrollsViewport(t *testing.T) {
 	}
 }
 
+func TestFavoriteOrderingDrivesCursorNavigation(t *testing.T) {
+	m := model{
+		mode:         repositoriesMode,
+		repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one"},
+		favorites:    map[string]bool{"523/lab-one": true},
+	}
+	if got, want := m.selectedRepositoryIndex(), 2; got != want {
+		t.Fatalf("initial selection index = %d, want %d", got, want)
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	if got, want := m.selectedRepositoryIndex(), 0; got != want {
+		t.Fatalf("selection after down = %d, want %d", got, want)
+	}
+}
+
 func TestFavoriteRepositoriesArePinnedAndGrouped(t *testing.T) {
 	m := model{
 		repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one"},

@@ -92,21 +92,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		if m.mode == repositoriesMode {
+			indexes := m.repositoryIndexes()
 			switch msg.String() {
 			case "up", "k":
 				m.cursor = max(0, m.cursor-1)
 			case "down", "j":
-				m.cursor = min(max(0, len(m.repositories)-1), m.cursor+1)
+				m.cursor = min(max(0, len(indexes)-1), m.cursor+1)
 			case "enter":
-				if len(m.repositories) > 0 {
+				if len(indexes) > 0 {
 					if m.favorites == nil {
 						m.favorites = make(map[string]bool)
 					}
-					repository := m.repositories[m.cursor]
+					repository := m.repositories[indexes[m.cursor]]
 					m.favorites[repository] = !m.favorites[repository]
 					if err := saveConfig(config{MDSFolder: m.path, Favorites: m.favorites}); err != nil {
 						m.favorites[repository] = !m.favorites[repository]
 						m.err = fmt.Errorf("save favorites: %w", err)
+					} else {
+						m.cursor = m.repositoryCursor(repository)
 					}
 				}
 			}
@@ -209,7 +212,7 @@ func (m model) repositoriesView() string {
 			if m.favorites[m.repositories[row.index]] {
 				marker = "[X]"
 			}
-			if row.index == m.cursor {
+			if row.index == m.selectedRepositoryIndex() {
 				lines = append(lines, cursorStyle.Render("▸ "+marker+" "+name))
 				continue
 			}
@@ -224,7 +227,7 @@ func (m model) repositoriesView() string {
 	return m.fullScreen(lines)
 }
 
-func (m model) repositoryListRows() []repositoryListRow {
+func (m model) repositoryIndexes() []int {
 	favorites := make([]int, 0, len(m.repositories))
 	regular := make([]int, 0, len(m.repositories))
 	for index, repository := range m.repositories {
@@ -234,6 +237,37 @@ func (m model) repositoryListRows() []repositoryListRow {
 		}
 		regular = append(regular, index)
 	}
+	return append(favorites, regular...)
+}
+
+func (m model) selectedRepositoryIndex() int {
+	indexes := m.repositoryIndexes()
+	if len(indexes) == 0 {
+		return -1
+	}
+	return indexes[min(m.cursor, len(indexes)-1)]
+}
+
+func (m model) repositoryCursor(repository string) int {
+	for cursor, index := range m.repositoryIndexes() {
+		if m.repositories[index] == repository {
+			return cursor
+		}
+	}
+	return 0
+}
+
+func (m model) repositoryListRows() []repositoryListRow {
+	indexes := m.repositoryIndexes()
+	favoriteCount := 0
+	for _, index := range indexes {
+		if !m.favorites[m.repositories[index]] {
+			break
+		}
+		favoriteCount++
+	}
+	favorites := indexes[:favoriteCount]
+	regular := indexes[favoriteCount:]
 
 	rows := make([]repositoryListRow, 0, len(m.repositories)+len(favorites)+2)
 	if len(favorites) > 0 {
@@ -260,7 +294,7 @@ func (m model) repositoryWindow(rows []repositoryListRow) (int, int) {
 	visible := max(1, m.contentHeight()-6)
 	cursorRow := 0
 	for index, row := range rows {
-		if row.index == m.cursor {
+		if row.index == m.selectedRepositoryIndex() {
 			cursorRow = index
 			break
 		}
