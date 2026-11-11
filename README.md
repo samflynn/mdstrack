@@ -20,4 +20,6 @@ Then start it with:
 mds
 ```
 
-On first launch, enter the path to the folder containing your UBC MDS repositories. The path is stored in your user configuration directory and every directory below it containing a `.git` folder is listed.
+On first launch, enter the path to the folder containing your UBC MDS repositories and your GitHub username. Both values are stored in your user configuration directory and every directory below the workspace containing a `.git` folder is listed.
+
+Press `s` in the repository list to open Settings. Use the arrow keys to select **Workspace** or **GitHub username**, then press Enter to edit the selected value.

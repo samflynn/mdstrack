@@ -18,6 +18,50 @@ func TestSetupAcceptsPastedPath(t *testing.T) {
 	}
 }
 
+func TestSetupPromptsForGitHubUsernameAfterWorkspace(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	workspace := t.TempDir()
+	m := model{mode: setupMode, path: workspace}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.setupStep, 1; got != want {
+		t.Fatalf("setup step = %d, want %d", got, want)
+	}
+	if !strings.Contains(m.setupView(), "GitHub username:") {
+		t.Fatal("expected the second setup prompt to request a GitHub username")
+	}
+}
+
+func TestSettingsUpdatesGitHubUsername(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := model{mode: repositoriesMode, path: t.TempDir(), githubUsername: "old-user", favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(model)
+	if m.mode != settingsMode {
+		t.Fatal("expected s to open settings")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.editingSetting != "github" {
+		t.Fatalf("editing setting = %q, want github", m.editingSetting)
+	}
+	m.settingInput = "new-user"
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.githubUsername, "new-user"; got != want {
+		t.Fatalf("GitHub username = %q, want %q", got, want)
+	}
+	stored, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stored.GitHubUsername, "new-user"; got != want {
+		t.Fatalf("stored GitHub username = %q, want %q", got, want)
+	}
+}
+
 func TestTruncateForTerminalWidth(t *testing.T) {
 	if got, want := truncate("repository-name", 8), "reposit…"; got != want {
 		t.Fatalf("truncate() = %q, want %q", got, want)

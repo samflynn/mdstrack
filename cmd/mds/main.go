@@ -17,6 +17,7 @@ const applicationName = "mds"
 
 type config struct {
 	MDSFolder      string          `json:"mds_folder"`
+	GitHubUsername string          `json:"github_username"`
 	Favorites      map[string]bool `json:"favorites"`
 	Collapsed      map[string]bool `json:"collapsed"`
 	FavoritesTitle string          `json:"favorites_title"`
@@ -27,6 +28,7 @@ type mode int
 const (
 	setupMode mode = iota
 	repositoriesMode
+	settingsMode
 )
 
 type repositoryListRow struct {
@@ -40,6 +42,11 @@ type repositoryListRow struct {
 type model struct {
 	mode           mode
 	path           string
+	githubUsername string
+	setupStep      int
+	settingsCursor int
+	editingSetting string
+	settingInput   string
 	repositories   []string
 	favorites      map[string]bool
 	collapsed      map[string]bool
@@ -87,7 +94,7 @@ func newModel() (model, error) {
 	}
 
 	repositories, err := findRepositories(stored.MDSFolder)
-	return model{mode: repositoriesMode, path: stored.MDSFolder, repositories: repositories, favorites: stored.Favorites, collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
+	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, repositories: repositories, favorites: stored.Favorites, collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -97,8 +104,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" || (msg.String() == "q" && !m.editingTitle) {
+		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.mode != setupMode && !m.editingTitle && m.editingSetting == "") {
 			return m, tea.Quit
+		}
+		if m.mode == settingsMode {
+			return m.updateSettings(msg)
 		}
 		if m.mode == repositoriesMode {
 			if m.editingTitle {
@@ -123,6 +133,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			rows := m.repositoryListRows()
 			switch msg.String() {
+			case "s":
+				m.mode, m.err = settingsMode, nil
 			case "up", "k":
 				m.cursor = m.moveCursor(rows, -1)
 			case "down", "j":
@@ -141,74 +153,185 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "enter":
-			return m.saveSetup()
+			return m.advanceSetup()
 		case "backspace", "ctrl+h":
-			if len(m.path) > 0 {
+			if m.setupStep == 0 && len(m.path) > 0 {
 				m.path = m.path[:len(m.path)-1]
+			}
+			if m.setupStep == 1 && len(m.githubUsername) > 0 {
+				m.githubUsername = m.githubUsername[:len(m.githubUsername)-1]
 			}
 		default:
 			if msg.Type == tea.KeyRunes {
-				m.path += string(msg.Runes)
+				if m.setupStep == 0 {
+					m.path += string(msg.Runes)
+				} else {
+					m.githubUsername += string(msg.Runes)
+				}
 			}
 		}
 	}
 	return m, nil
 }
 
-func (m model) saveSetup() (tea.Model, tea.Cmd) {
+func (m model) advanceSetup() (tea.Model, tea.Cmd) {
+	if m.setupStep == 0 {
+		folder := strings.TrimSpace(m.path)
+		if folder == "" {
+			m.err = errors.New("enter the path to your UBC MDS folder")
+			return m, nil
+		}
+		absoluteFolder, err := filepath.Abs(filepath.Clean(folder))
+		if err != nil {
+			m.err = fmt.Errorf("resolve folder: %w", err)
+			return m, nil
+		}
+		info, err := os.Stat(absoluteFolder)
+		if err != nil {
+			m.err = fmt.Errorf("open folder: %w", err)
+			return m, nil
+		}
+		if !info.IsDir() {
+			m.err = errors.New("the MDS path must be a folder")
+			return m, nil
+		}
+		m.path, m.setupStep, m.err = absoluteFolder, 1, nil
+		return m, nil
+	}
+
 	folder := strings.TrimSpace(m.path)
-	if folder == "" {
-		m.err = errors.New("enter the path to your UBC MDS folder")
+	username := strings.TrimSpace(m.githubUsername)
+	if username == "" {
+		m.err = errors.New("enter your GitHub username")
 		return m, nil
 	}
-
-	absoluteFolder, err := filepath.Abs(filepath.Clean(folder))
-	if err != nil {
-		m.err = fmt.Errorf("resolve folder: %w", err)
-		return m, nil
-	}
-	info, err := os.Stat(absoluteFolder)
-	if err != nil {
-		m.err = fmt.Errorf("open folder: %w", err)
-		return m, nil
-	}
-	if !info.IsDir() {
-		m.err = errors.New("the MDS path must be a folder")
-		return m, nil
-	}
-
-	if err := saveConfig(config{MDSFolder: absoluteFolder, Favorites: make(map[string]bool), Collapsed: make(map[string]bool)}); err != nil {
+	if err := saveConfig(config{MDSFolder: folder, GitHubUsername: username, Favorites: make(map[string]bool), Collapsed: make(map[string]bool)}); err != nil {
 		m.err = fmt.Errorf("save configuration: %w", err)
 		return m, nil
 	}
-	repositories, err := findRepositories(absoluteFolder)
-	m.mode, m.path, m.repositories, m.favorites, m.collapsed, m.err = repositoriesMode, absoluteFolder, repositories, make(map[string]bool), make(map[string]bool), err
+	repositories, err := findRepositories(folder)
+	m.mode, m.path, m.githubUsername, m.repositories, m.favorites, m.collapsed, m.err = repositoriesMode, folder, username, repositories, make(map[string]bool), make(map[string]bool), err
 	return m, nil
 }
 
 func (m model) View() string {
-	if m.mode == setupMode {
+	switch m.mode {
+	case setupMode:
 		return m.setupView()
+	case settingsMode:
+		return m.settingsView()
+	default:
+		return m.repositoriesView()
 	}
-	return m.repositoriesView()
 }
 
 func (m model) setupView() string {
 	width := m.contentWidth()
-	lines := []string{
-		titleStyle.Render("mds"),
-		mutedStyle.Render("UBC MDS repository tracker"),
-		"",
-		"First-time setup",
-		"",
-		"Location of UBC MDS folder:",
-		promptStyle.Render("> " + truncateLeft(m.path, max(1, width-3)) + "█"),
+	label, value := "Location of UBC MDS folder:", m.path
+	if m.setupStep == 1 {
+		label, value = "GitHub username:", m.githubUsername
 	}
+	lines := []string{titleStyle.Render("mds"), mutedStyle.Render("UBC MDS repository tracker"), "", "First-time setup", "", label, promptStyle.Render("> " + truncateLeft(value, max(1, width-3)) + "█")}
 	if m.err != nil {
 		lines = append(lines, "", errorStyle.Render(truncate("Error: "+m.err.Error(), width)))
 	}
 	lines = append(lines, "", mutedStyle.Render(truncate("Enter to continue · q or Ctrl+C to quit", width)))
 	return m.fullScreen(lines)
+}
+
+func (m model) settingsView() string {
+	width := m.contentWidth()
+	values := []string{"Workspace: " + m.path, "GitHub username: " + m.githubUsername}
+	lines := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("Settings"), ""}
+	for index, value := range values {
+		prefix := "  "
+		if index == m.settingsCursor {
+			prefix = "▸ "
+		}
+		style := mutedStyle
+		if index == m.settingsCursor {
+			style = cursorStyle
+		}
+		lines = append(lines, style.Render(prefix+truncate(value, width)))
+	}
+	if m.editingSetting != "" {
+		lines = append(lines, "", promptStyle.Render("New value: "+truncateLeft(m.settingInput, max(1, width-12))+"█"), mutedStyle.Render("Enter save · Esc cancel"))
+	}
+	if m.err != nil {
+		lines = append(lines, "", errorStyle.Render(truncate("Error: "+m.err.Error(), width)))
+	}
+	lines = append(lines, "", mutedStyle.Render("↑/↓ select · Enter edit · Esc back · q quit"))
+	return m.fullScreen(lines)
+}
+
+func (m model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.editingSetting != "" {
+		switch msg.String() {
+		case "enter":
+			return m.saveSetting()
+		case "esc":
+			m.editingSetting, m.settingInput = "", ""
+		case "backspace", "ctrl+h":
+			if len(m.settingInput) > 0 {
+				m.settingInput = m.settingInput[:len(m.settingInput)-1]
+			}
+		default:
+			if msg.Type == tea.KeyRunes {
+				m.settingInput += string(msg.Runes)
+			}
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.mode, m.err = repositoriesMode, nil
+	case "up", "k":
+		m.settingsCursor = max(0, m.settingsCursor-1)
+	case "down", "j":
+		m.settingsCursor = min(1, m.settingsCursor+1)
+	case "enter":
+		if m.settingsCursor == 0 {
+			m.editingSetting, m.settingInput = "workspace", m.path
+		} else {
+			m.editingSetting, m.settingInput = "github", m.githubUsername
+		}
+	}
+	return m, nil
+}
+
+func (m model) saveSetting() (tea.Model, tea.Cmd) {
+	value := strings.TrimSpace(m.settingInput)
+	if value == "" {
+		m.err = errors.New("a setting cannot be empty")
+		return m, nil
+	}
+	if m.editingSetting == "workspace" {
+		folder, err := filepath.Abs(filepath.Clean(value))
+		if err != nil {
+			m.err = fmt.Errorf("resolve folder: %w", err)
+			return m, nil
+		}
+		info, err := os.Stat(folder)
+		if err != nil {
+			m.err = fmt.Errorf("open folder: %w", err)
+			return m, nil
+		}
+		if !info.IsDir() {
+			m.err = errors.New("the workspace path must be a folder")
+			return m, nil
+		}
+		repositories, err := findRepositories(folder)
+		if err != nil {
+			m.err = fmt.Errorf("scan repositories: %w", err)
+			return m, nil
+		}
+		m.path, m.repositories = folder, repositories
+	} else {
+		m.githubUsername = value
+	}
+	m.editingSetting, m.settingInput, m.err = "", "", nil
+	m.savePreferences()
+	return m, nil
 }
 
 func (m model) repositoriesView() string {
@@ -313,7 +436,7 @@ func (m *model) activateRow(row repositoryListRow) {
 }
 
 func (m *model) savePreferences() {
-	if err := saveConfig(config{MDSFolder: m.path, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle}); err != nil {
+	if err := saveConfig(config{MDSFolder: m.path, GitHubUsername: m.githubUsername, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle}); err != nil {
 		m.err = fmt.Errorf("save preferences: %w", err)
 	}
 }
