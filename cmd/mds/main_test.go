@@ -132,6 +132,32 @@ func TestTrackedRepositoryRendersCommitError(t *testing.T) {
 	}
 }
 
+func TestGitHubActionsMenuOpensForSelectedRepository(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m = updated.(model)
+	if !m.githubActions {
+		t.Fatal("expected g to open the GitHub actions menu for a repository")
+	}
+	if view := m.repositoriesView(); !strings.Contains(view, "GitHub actions") || !strings.Contains(view, "Copy GitHub URL") {
+		t.Fatalf("expected GitHub actions menu in view, got %q", view)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(model).githubActions {
+		t.Fatal("expected Esc to close the GitHub actions menu")
+	}
+}
+
+func TestGitHubActionsMenuDoesNotOpenForGroupHeader(t *testing.T) {
+	m := model{mode: repositoriesMode, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if updated.(model).githubActions {
+		t.Fatal("expected g on a group header to leave the GitHub actions menu closed")
+	}
+}
+
 func TestGitHubCommitCountMatchesLoginOrDisplayName(t *testing.T) {
 	commits := []githubCommit{
 		{Author: &struct {

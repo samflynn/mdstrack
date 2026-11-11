@@ -46,6 +46,10 @@ type commitCountsMsg struct {
 
 type commitSpinnerTickMsg struct{}
 
+type repositoryActionMsg struct {
+	err error
+}
+
 type repositoryListRow struct {
 	group      string
 	repository string
@@ -74,6 +78,8 @@ type model struct {
 	favoritesTitle    string
 	editingTitle      bool
 	titleInput        string
+	githubActions     bool
+	actionStatus      string
 	cursor            int
 	err               error
 	width             int
@@ -170,6 +176,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(commitSpinnerFrames)
 			return m, nextCommitSpinnerTick()
 		}
+	case repositoryActionMsg:
+		if msg.err != nil {
+			m.actionStatus = "Action failed: " + msg.err.Error()
+		}
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.mode != setupMode && !m.editingTitle && m.editingSetting == "") {
 			return m, tea.Quit
@@ -178,6 +188,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSettings(msg)
 		}
 		if m.mode == repositoriesMode {
+			if m.githubActions {
+				return m.updateGitHubActions(msg)
+			}
 			if m.editingTitle {
 				switch msg.String() {
 				case "enter":
@@ -209,6 +222,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "e":
 				if len(rows) > 0 && rows[m.cursor].key == "favorites" {
 					m.editingTitle, m.titleInput = true, m.favoritesDisplayTitle()
+				}
+			case "f":
+				if repository, ok := m.selectedRepository(rows); ok {
+					return m, openInFinder(filepath.Join(m.path, repository))
+				}
+			case "g":
+				if _, ok := m.selectedRepository(rows); ok {
+					m.githubActions, m.actionStatus = true, ""
 				}
 			case "enter":
 				if len(rows) > 0 {
@@ -458,6 +479,74 @@ func (m model) saveSetting() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateGitHubActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" {
+		m.githubActions = false
+		return m, nil
+	}
+	repository, ok := m.selectedRepository(m.repositoryListRows())
+	if !ok {
+		m.githubActions = false
+		return m, nil
+	}
+	url, err := m.githubURL(repository)
+	if err != nil {
+		m.actionStatus = "GitHub action unavailable: " + err.Error()
+		return m, nil
+	}
+	switch msg.String() {
+	case "o":
+		m.githubActions = false
+		return m, openURL(url)
+	case "c":
+		m.githubActions = false
+		m.actionStatus = "Copied GitHub URL"
+		return m, copyToClipboard(url)
+	}
+	return m, nil
+}
+
+func (m model) selectedRepository(rows []repositoryListRow) (string, bool) {
+	if m.cursor < 0 || m.cursor >= len(rows) || rows[m.cursor].header || rows[m.cursor].key == "divider" {
+		return "", false
+	}
+	return m.repositories[rows[m.cursor].index], true
+}
+
+func (m model) githubURL(repository string) (string, error) {
+	remote, err := gitOriginURL(filepath.Join(m.path, repository))
+	if err != nil {
+		return "", err
+	}
+	host, owner, name, ok := githubRepository(remote)
+	if !ok {
+		return "", errors.New("origin is not hosted on GitHub")
+	}
+	return fmt.Sprintf("https://%s/%s/%s", host, owner, name), nil
+}
+
+func openInFinder(path string) tea.Cmd {
+	return runRepositoryAction("open", path)
+}
+
+func openURL(url string) tea.Cmd {
+	return runRepositoryAction("open", url)
+}
+
+func copyToClipboard(value string) tea.Cmd {
+	return func() tea.Msg {
+		command := exec.Command("pbcopy")
+		command.Stdin = strings.NewReader(value)
+		return repositoryActionMsg{err: command.Run()}
+	}
+}
+
+func runRepositoryAction(command string, argument string) tea.Cmd {
+	return func() tea.Msg {
+		return repositoryActionMsg{err: exec.Command(command, argument).Run()}
+	}
+}
+
 func (m model) repositoriesView() string {
 	width := m.contentWidth()
 	lines := []string{
@@ -537,10 +626,16 @@ func (m model) repositoriesView() string {
 	if m.editingTitle {
 		lines = append(lines, "", promptStyle.Render("Rename tracking: "+truncate(m.titleInput, max(1, width-17))+"█"), mutedStyle.Render("Enter save · Esc cancel"))
 	}
+	if m.githubActions {
+		lines = append(lines, "", promptStyle.Render("GitHub actions"), "  o  Open GitHub URL in browser", "  c  Copy GitHub URL", mutedStyle.Render("Esc cancel"))
+	}
+	if m.actionStatus != "" {
+		lines = append(lines, "", mutedStyle.Render(truncate(m.actionStatus, width)))
+	}
 	if repository, err := m.firstCommitError(); err != nil {
 		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
-	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · e rename tracking · s settings · q quit", len(m.repositories))
+	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · f Finder · g GitHub · e rename tracking · s settings · q quit", len(m.repositories))
 	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
 }

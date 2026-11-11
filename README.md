@@ -25,3 +25,5 @@ On first launch, enter the path to the folder containing your UBC MDS repositori
 Press `s` in the repository list to open Settings. Use the arrow keys to select **Workspace**, **GitHub username**, **GitHub profile display name**, or **GitHub host**, then press Enter to edit the selected value.
 
 Tracked repositories use the authenticated `gh` CLI for the configured host to count commits whose GitHub login or commit author display name matches your settings. Counts are shown only for tracked repositories hosted on the configured GitHub instance as a 12-cell progress bar toward three commits, followed by the actual count, such as `5/3`. The bar, count, and repository name are red at 0–1, yellow at 2, and green from 3 onward.
+
+With a repository row selected, press `f` to open its folder in Finder. Press `g` to open the GitHub action menu, then press `o` to open its origin URL in the default browser or `c` to copy that URL to the macOS clipboard.
