@@ -714,25 +714,55 @@ func githubRepository(remote string) (string, string, string, bool) {
 	return host, parts[0], parts[1], true
 }
 
+type githubCommit struct {
+	Author *struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	Commit struct {
+		Author struct {
+			Name string `json:"name"`
+		} `json:"author"`
+	} `json:"commit"`
+}
+
 func githubCommitCount(host, owner, repository, username string) (int, error) {
-	endpoint := fmt.Sprintf("repos/%s/%s/commits?author=%s&per_page=100", owner, repository, username)
+	displayName, err := githubDisplayName(host, username)
+	if err != nil {
+		return 0, err
+	}
+	endpoint := fmt.Sprintf("repos/%s/%s/commits?per_page=100", owner, repository)
 	output, err := exec.Command("gh", "api", "--hostname", host, "--paginate", "--slurp", endpoint).CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("query GitHub commits: %s", strings.TrimSpace(string(output)))
 	}
-	var pages []json.RawMessage
+	var pages [][]githubCommit
 	if err := json.Unmarshal(output, &pages); err != nil {
 		return 0, fmt.Errorf("decode GitHub commits: %w", err)
 	}
 	count := 0
-	for _, page := range pages {
-		var commits []json.RawMessage
-		if err := json.Unmarshal(page, &commits); err != nil {
-			return 0, fmt.Errorf("decode GitHub commit page: %w", err)
+	for _, commits := range pages {
+		for _, commit := range commits {
+			if commitMatchesUser(commit, username, displayName) {
+				count++
+			}
 		}
-		count += len(commits)
 	}
 	return count, nil
+}
+
+func commitMatchesUser(commit githubCommit, username, displayName string) bool {
+	if commit.Author != nil && strings.EqualFold(commit.Author.Login, username) {
+		return true
+	}
+	return displayName != "" && strings.EqualFold(commit.Commit.Author.Name, displayName)
+}
+
+func githubDisplayName(host, username string) (string, error) {
+	output, err := exec.Command("gh", "api", "--hostname", host, "users/"+username, "--jq", ".name").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("look up GitHub user: %s", strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func configPath() (string, error) {

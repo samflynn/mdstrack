@@ -71,6 +71,33 @@ func TestTrackedRepositoryRendersCommitError(t *testing.T) {
 	}
 }
 
+func TestGitHubCommitCountMatchesLoginOrDisplayName(t *testing.T) {
+	commits := []githubCommit{
+		{Author: &struct {
+			Login string `json:"login"`
+		}{Login: "smudgal"}},
+		{Commit: struct {
+			Author struct {
+				Name string `json:"name"`
+			} `json:"author"`
+		}{Author: struct {
+			Name string `json:"name"`
+		}{Name: "Shrey Mudgal"}}},
+		{Author: &struct {
+			Login string `json:"login"`
+		}{Login: "another-user"}},
+	}
+	count := 0
+	for _, commit := range commits {
+		if commitMatchesUser(commit, "smudgal", "Shrey Mudgal") {
+			count++
+		}
+	}
+	if got, want := count, 2; got != want {
+		t.Fatalf("matched commits = %d, want %d", got, want)
+	}
+}
+
 func TestTrackedRepositoryRendersCommitCount(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{"511/lab-one": 14}, collapsed: map[string]bool{}}
 	if !strings.Contains(m.repositoriesView(), "14 commits") {
