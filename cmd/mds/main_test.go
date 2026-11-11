@@ -138,6 +138,23 @@ func TestDeadlineUsesOverrideUntilItPasses(t *testing.T) {
 	}
 }
 
+func TestDeadlineStatusUsesCalendarDays(t *testing.T) {
+	now := time.Date(2026, time.November, 11, 23, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		deadline time.Time
+		want     string
+	}{
+		{deadline: time.Date(2026, time.November, 14, 1, 0, 0, 0, time.UTC), want: "3 days left"},
+		{deadline: time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC), want: "1 day left"},
+		{deadline: time.Date(2026, time.November, 11, 0, 0, 0, 0, time.UTC), want: "due today"},
+		{deadline: time.Date(2026, time.November, 9, 0, 0, 0, 0, time.UTC), want: "2 days overdue"},
+	} {
+		if got := deadlineStatus(test.deadline, now); !strings.Contains(got, test.want) {
+			t.Errorf("deadlineStatus(%s) = %q, want %q", test.deadline, got, test.want)
+		}
+	}
+}
+
 func TestSettingsSavesAndClearsDeadlineOverride(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	m := model{mode: settingsMode, path: t.TempDir(), githubUsername: "smudgal", githubProfileName: "Shrey Mudgal", githubHost: "github.ubc.ca", favorites: map[string]bool{}, collapsed: map[string]bool{}, settingsCursor: 4}

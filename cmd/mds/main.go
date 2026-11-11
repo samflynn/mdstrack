@@ -848,8 +848,10 @@ func (m model) repositoriesView() string {
 				marker = "[X]"
 			}
 			countText := ""
+			deadlineText := ""
 			nameStyle := lipgloss.NewStyle()
 			if m.favorites[m.repositories[row.index]] {
+				deadlineText = deadlineStatus(m.effectiveDeadline(time.Now()), time.Now())
 				if count, ok := m.commitCounts[m.repositories[row.index]]; ok {
 					countText = commitProgress(count)
 					nameStyle = commitProgressStyle(count)
@@ -864,15 +866,22 @@ func (m model) repositoriesView() string {
 			if selected {
 				prefix = "▸ " + prefix
 			}
-			available := width - lipgloss.Width(prefix) - lipgloss.Width(countText)
+			rightText := deadlineText
+			if countText != "" {
+				if rightText != "" {
+					rightText += "  "
+				}
+				rightText += countText
+			}
+			available := width - lipgloss.Width(prefix) - lipgloss.Width(rightText)
 			name := truncate(row.repository, max(1, available-1))
 			prefixText := selectedStyle.Render(prefix)
 			if selected {
 				prefixText = cursorStyle.Render(prefix)
 			}
 			rowText := prefixText + nameStyle.Render(name)
-			if countText != "" {
-				rowText += strings.Repeat(" ", max(1, width-lipgloss.Width(rowText)-lipgloss.Width(countText))) + countText
+			if rightText != "" {
+				rowText += strings.Repeat(" ", max(1, width-lipgloss.Width(rowText)-lipgloss.Width(rightText))) + rightText
 			}
 			lines = append(lines, rowText)
 		}
@@ -1097,6 +1106,24 @@ func truncateLeft(value string, width int) string {
 func commitProgress(count int) string {
 	style := commitProgressStyle(count)
 	return style.Render(commitProgressBar(count)) + " " + style.Render(fmt.Sprintf("%d/%d", count, commitGoal))
+}
+
+func deadlineStatus(deadline, now time.Time) string {
+	deadlineDay := time.Date(deadline.Year(), deadline.Month(), deadline.Day(), 0, 0, 0, 0, deadline.Location())
+	nowDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	days := int(deadlineDay.Sub(nowDay).Hours() / 24)
+	switch {
+	case days == 0:
+		return promptStyle.Render("due today")
+	case days == 1:
+		return promptStyle.Render("1 day left")
+	case days > 1:
+		return promptStyle.Render(fmt.Sprintf("%d days left", days))
+	case days == -1:
+		return errorStyle.Render("1 day overdue")
+	default:
+		return errorStyle.Render(fmt.Sprintf("%d days overdue", -days))
+	}
 }
 
 func commitProgressBar(count int) string {
