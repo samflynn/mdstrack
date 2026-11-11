@@ -655,12 +655,12 @@ func loadTrackedCommitCounts(workspace string, repositories []string, favorites 
 				failures[repository] = err
 				continue
 			}
-			owner, name, ok := githubRepository(remote)
+			host, owner, name, ok := githubRepository(remote)
 			if !ok {
 				failures[repository] = errors.New("origin is not hosted on GitHub")
 				continue
 			}
-			count, err := githubCommitCount(owner, name, username)
+			count, err := githubCommitCount(host, owner, name, username)
 			if err != nil {
 				failures[repository] = err
 				continue
@@ -679,29 +679,44 @@ func gitOriginURL(repository string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func githubRepository(remote string) (string, string, bool) {
+func githubRepository(remote string) (string, string, string, bool) {
 	remote = strings.TrimSuffix(strings.TrimSpace(remote), ".git")
-	var path string
+	var host, path string
 	switch {
-	case strings.HasPrefix(remote, "git@github.com:"):
-		path = strings.TrimPrefix(remote, "git@github.com:")
-	case strings.HasPrefix(remote, "https://github.com/"):
-		path = strings.TrimPrefix(remote, "https://github.com/")
-	case strings.HasPrefix(remote, "ssh://git@github.com/"):
-		path = strings.TrimPrefix(remote, "ssh://git@github.com/")
+	case strings.HasPrefix(remote, "git@"):
+		parts := strings.SplitN(strings.TrimPrefix(remote, "git@"), ":", 2)
+		if len(parts) != 2 {
+			return "", "", "", false
+		}
+		host, path = parts[0], parts[1]
+	case strings.HasPrefix(remote, "https://"):
+		parts := strings.SplitN(strings.TrimPrefix(remote, "https://"), "/", 2)
+		if len(parts) != 2 {
+			return "", "", "", false
+		}
+		host, path = parts[0], parts[1]
+	case strings.HasPrefix(remote, "ssh://git@"):
+		parts := strings.SplitN(strings.TrimPrefix(remote, "ssh://git@"), "/", 2)
+		if len(parts) != 2 {
+			return "", "", "", false
+		}
+		host, path = parts[0], parts[1]
 	default:
-		return "", "", false
+		return "", "", "", false
+	}
+	if !strings.Contains(host, "github") {
+		return "", "", "", false
 	}
 	parts := strings.Split(path, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
+		return "", "", "", false
 	}
-	return parts[0], parts[1], true
+	return host, parts[0], parts[1], true
 }
 
-func githubCommitCount(owner, repository, username string) (int, error) {
+func githubCommitCount(host, owner, repository, username string) (int, error) {
 	endpoint := fmt.Sprintf("repos/%s/%s/commits?author=%s&per_page=100", owner, repository, username)
-	output, err := exec.Command("gh", "api", "--paginate", "--slurp", endpoint).CombinedOutput()
+	output, err := exec.Command("gh", "api", "--hostname", host, "--paginate", "--slurp", endpoint).CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("query GitHub commits: %s", strings.TrimSpace(string(output)))
 	}

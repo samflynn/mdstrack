@@ -79,13 +79,13 @@ func TestTrackedRepositoryRendersCommitCount(t *testing.T) {
 }
 
 func TestGitHubRepositoryParsesSupportedOrigins(t *testing.T) {
-	for _, remote := range []string{"git@github.com:BagToad/mdstrack.git", "https://github.com/BagToad/mdstrack.git", "ssh://git@github.com/BagToad/mdstrack"} {
-		owner, repository, ok := githubRepository(remote)
-		if !ok || owner != "BagToad" || repository != "mdstrack" {
-			t.Fatalf("githubRepository(%q) = (%q, %q, %t)", remote, owner, repository, ok)
+	for _, remote := range []string{"git@github.com:BagToad/mdstrack.git", "https://github.com/BagToad/mdstrack.git", "ssh://git@github.com/BagToad/mdstrack", "https://github.ubc.ca/mds-2026-27/DSCI_511_worksheet1_smudgal.git"} {
+		host, owner, repository, ok := githubRepository(remote)
+		if !ok || owner == "" || repository == "" || host == "" {
+			t.Fatalf("githubRepository(%q) = (%q, %q, %q, %t)", remote, host, owner, repository, ok)
 		}
 	}
-	if _, _, ok := githubRepository("https://gitlab.com/BagToad/mdstrack.git"); ok {
+	if _, _, _, ok := githubRepository("https://gitlab.com/BagToad/mdstrack.git"); ok {
 		t.Fatal("expected non-GitHub remote to be rejected")
 	}
 }
