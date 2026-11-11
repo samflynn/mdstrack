@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -31,6 +32,11 @@ const (
 	settingsMode
 )
 
+type commitCountsMsg struct {
+	counts map[string]int
+	errors map[string]error
+}
+
 type repositoryListRow struct {
 	group      string
 	repository string
@@ -49,6 +55,8 @@ type model struct {
 	settingInput   string
 	repositories   []string
 	favorites      map[string]bool
+	commitCounts   map[string]int
+	commitErrors   map[string]error
 	collapsed      map[string]bool
 	favoritesTitle string
 	editingTitle   bool
@@ -94,15 +102,22 @@ func newModel() (model, error) {
 	}
 
 	repositories, err := findRepositories(stored.MDSFolder)
-	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, repositories: repositories, favorites: stored.Favorites, collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
+	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
 }
 
-func (m model) Init() tea.Cmd { return nil }
+func (m model) Init() tea.Cmd {
+	if m.mode != repositoriesMode {
+		return nil
+	}
+	return loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername)
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+	case commitCountsMsg:
+		m.commitCounts, m.commitErrors = msg.counts, msg.errors
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.mode != setupMode && !m.editingTitle && m.editingSetting == "") {
 			return m, tea.Quit
@@ -146,6 +161,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if len(rows) > 0 {
 					m.activateRow(rows[m.cursor])
+					return m, loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername)
 				}
 			}
 			return m, nil
@@ -373,15 +389,32 @@ func (m model) repositoriesView() string {
 				}
 				continue
 			}
-			name := truncate(row.repository, max(1, width-len(indent)-5))
 			marker := "[ ]"
 			if m.favorites[m.repositories[row.index]] {
 				marker = "[X]"
 			}
+			countText := ""
+			if m.favorites[m.repositories[row.index]] {
+				if count, ok := m.commitCounts[m.repositories[row.index]]; ok {
+					countText = fmt.Sprintf("%d commits", count)
+				} else if m.commitErrors[m.repositories[row.index]] != nil {
+					countText = "—"
+				}
+			}
+			prefix := indent + marker + " "
 			if selected {
-				lines = append(lines, cursorStyle.Render("▸ "+indent+marker+" "+name))
+				prefix = "▸ " + prefix
+			}
+			available := width - lipgloss.Width(prefix) - lipgloss.Width(countText)
+			name := truncate(row.repository, max(1, available-1))
+			rowText := prefix + name
+			if countText != "" {
+				rowText += strings.Repeat(" ", max(1, width-lipgloss.Width(rowText)-lipgloss.Width(countText))) + countText
+			}
+			if selected {
+				lines = append(lines, cursorStyle.Render(rowText))
 			} else {
-				lines = append(lines, selectedStyle.Render(indent+marker+" ")+name)
+				lines = append(lines, selectedStyle.Render(prefix)+name+mutedStyle.Render(strings.TrimPrefix(rowText, prefix+name)))
 			}
 		}
 		if start > 0 || end < len(rows) {
@@ -591,6 +624,88 @@ func findRepositories(root string) ([]string, error) {
 	}
 	sort.Strings(repositories)
 	return repositories, nil
+}
+
+func loadTrackedCommitCounts(workspace string, repositories []string, favorites map[string]bool, username string) tea.Cmd {
+	return func() tea.Msg {
+		counts := make(map[string]int)
+		failures := make(map[string]error)
+		if username == "" {
+			return commitCountsMsg{counts: counts, errors: failures}
+		}
+		for _, repository := range repositories {
+			if !favorites[repository] {
+				continue
+			}
+			fullPath := filepath.Join(workspace, repository)
+			remote, err := gitOriginURL(fullPath)
+			if err != nil {
+				failures[repository] = err
+				continue
+			}
+			owner, name, ok := githubRepository(remote)
+			if !ok {
+				failures[repository] = errors.New("origin is not hosted on GitHub")
+				continue
+			}
+			count, err := githubCommitCount(owner, name, username)
+			if err != nil {
+				failures[repository] = err
+				continue
+			}
+			counts[repository] = count
+		}
+		return commitCountsMsg{counts: counts, errors: failures}
+	}
+}
+
+func gitOriginURL(repository string) (string, error) {
+	output, err := exec.Command("git", "-C", repository, "config", "--get", "remote.origin.url").Output()
+	if err != nil {
+		return "", fmt.Errorf("read origin URL: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func githubRepository(remote string) (string, string, bool) {
+	remote = strings.TrimSuffix(strings.TrimSpace(remote), ".git")
+	var path string
+	switch {
+	case strings.HasPrefix(remote, "git@github.com:"):
+		path = strings.TrimPrefix(remote, "git@github.com:")
+	case strings.HasPrefix(remote, "https://github.com/"):
+		path = strings.TrimPrefix(remote, "https://github.com/")
+	case strings.HasPrefix(remote, "ssh://git@github.com/"):
+		path = strings.TrimPrefix(remote, "ssh://git@github.com/")
+	default:
+		return "", "", false
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func githubCommitCount(owner, repository, username string) (int, error) {
+	endpoint := fmt.Sprintf("repos/%s/%s/commits?author=%s&per_page=100", owner, repository, username)
+	output, err := exec.Command("gh", "api", "--paginate", "--slurp", endpoint).CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("query GitHub commits: %s", strings.TrimSpace(string(output)))
+	}
+	var pages []json.RawMessage
+	if err := json.Unmarshal(output, &pages); err != nil {
+		return 0, fmt.Errorf("decode GitHub commits: %w", err)
+	}
+	count := 0
+	for _, page := range pages {
+		var commits []json.RawMessage
+		if err := json.Unmarshal(page, &commits); err != nil {
+			return 0, fmt.Errorf("decode GitHub commit page: %w", err)
+		}
+		count += len(commits)
+	}
+	return count, nil
 }
 
 func configPath() (string, error) {

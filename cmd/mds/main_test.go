@@ -62,6 +62,25 @@ func TestSettingsUpdatesGitHubUsername(t *testing.T) {
 	}
 }
 
+func TestTrackedRepositoryRendersCommitCount(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{"511/lab-one": 14}, collapsed: map[string]bool{}}
+	if !strings.Contains(m.repositoriesView(), "14 commits") {
+		t.Fatal("expected tracked repository to render its GitHub commit count")
+	}
+}
+
+func TestGitHubRepositoryParsesSupportedOrigins(t *testing.T) {
+	for _, remote := range []string{"git@github.com:BagToad/mdstrack.git", "https://github.com/BagToad/mdstrack.git", "ssh://git@github.com/BagToad/mdstrack"} {
+		owner, repository, ok := githubRepository(remote)
+		if !ok || owner != "BagToad" || repository != "mdstrack" {
+			t.Fatalf("githubRepository(%q) = (%q, %q, %t)", remote, owner, repository, ok)
+		}
+	}
+	if _, _, ok := githubRepository("https://gitlab.com/BagToad/mdstrack.git"); ok {
+		t.Fatal("expected non-GitHub remote to be rejected")
+	}
+}
+
 func TestTruncateForTerminalWidth(t *testing.T) {
 	if got, want := truncate("repository-name", 8), "reposit…"; got != want {
 		t.Fatalf("truncate() = %q, want %q", got, want)
