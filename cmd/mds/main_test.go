@@ -63,6 +63,56 @@ func TestSettingsUpdatesGitHubUsername(t *testing.T) {
 	}
 }
 
+func TestSettingsUpdatesGitHubProfileNameAndHost(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := model{mode: repositoriesMode, path: t.TempDir(), githubUsername: "smudgal", githubProfileName: "Old Name", githubHost: "github.ubc.ca", favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	m.settingsCursor = 2
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.editingSetting, "profile-name"; got != want {
+		t.Fatalf("editing setting = %q, want %q", got, want)
+	}
+	m.settingInput = "Shrey Mudgal"
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	m.settingsCursor = 3
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	m.settingInput = "https://github.ubc.ca/"
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.githubProfileName, "Shrey Mudgal"; got != want {
+		t.Fatalf("GitHub profile display name = %q, want %q", got, want)
+	}
+	if got, want := m.githubHost, "github.ubc.ca"; got != want {
+		t.Fatalf("GitHub host = %q, want %q", got, want)
+	}
+	stored, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stored.GitHubProfileName, "Shrey Mudgal"; got != want {
+		t.Fatalf("stored profile display name = %q, want %q", got, want)
+	}
+	if got, want := stored.GitHubHost, "github.ubc.ca"; got != want {
+		t.Fatalf("stored GitHub host = %q, want %q", got, want)
+	}
+}
+
+func TestSetupPromptsForProfileNameAndGitHubHost(t *testing.T) {
+	m := model{mode: setupMode, setupStep: 2}
+	if !strings.Contains(m.setupView(), "GitHub profile display name:") {
+		t.Fatal("expected setup to request the GitHub profile display name")
+	}
+	m.setupStep = 3
+	m.githubHost = defaultGitHubHost
+	if !strings.Contains(m.setupView(), "GitHub host:") {
+		t.Fatal("expected setup to request the GitHub host")
+	}
+}
+
 func TestTrackedRepositoryRendersCommitError(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 100, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitErrors: map[string]error{"511/lab-one": errors.New("gh auth login required")}, collapsed: map[string]bool{}}
 	view := m.repositoriesView()
@@ -185,7 +235,7 @@ func TestFavoritesTitleCanBeEditedAndPersists(t *testing.T) {
 
 func TestFavoritePersistence(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	want := config{MDSFolder: "/tmp/mds", Favorites: map[string]bool{"511/lab-one": true}, Collapsed: map[string]bool{"favorites": true}, FavoritesTitle: "priority"}
+	want := config{MDSFolder: "/tmp/mds", GitHubProfileName: "Shrey Mudgal", GitHubHost: "github.ubc.ca", Favorites: map[string]bool{"511/lab-one": true}, Collapsed: map[string]bool{"favorites": true}, FavoritesTitle: "priority"}
 	if err := saveConfig(want); err != nil {
 		t.Fatal(err)
 	}

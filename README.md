@@ -20,8 +20,8 @@ Then start it with:
 mds
 ```
 
-On first launch, enter the path to the folder containing your UBC MDS repositories and your GitHub username. Both values are stored in your user configuration directory and every directory below the workspace containing a `.git` folder is listed.
+On first launch, enter the path to the folder containing your UBC MDS repositories, GitHub username, GitHub profile display name, and GitHub host. The host defaults to `github.ubc.ca`. These values are stored in your user configuration directory and every directory below the workspace containing a `.git` folder is listed.
 
-Press `s` in the repository list to open Settings. Use the arrow keys to select **Workspace** or **GitHub username**, then press Enter to edit the selected value.
+Press `s` in the repository list to open Settings. Use the arrow keys to select **Workspace**, **GitHub username**, **GitHub profile display name**, or **GitHub host**, then press Enter to edit the selected value.
 
-Tracked repositories use the authenticated `gh` CLI to show the number of commits attributed by GitHub to the configured username. Counts are shown only for GitHub-hosted tracked repositories.
+Tracked repositories use the authenticated `gh` CLI for the configured host to show commits whose GitHub login or commit author display name matches your settings. Counts are shown only for tracked repositories hosted on the configured GitHub instance.

@@ -15,13 +15,16 @@ import (
 )
 
 const applicationName = "mds"
+const defaultGitHubHost = "github.ubc.ca"
 
 type config struct {
-	MDSFolder      string          `json:"mds_folder"`
-	GitHubUsername string          `json:"github_username"`
-	Favorites      map[string]bool `json:"favorites"`
-	Collapsed      map[string]bool `json:"collapsed"`
-	FavoritesTitle string          `json:"favorites_title"`
+	MDSFolder         string          `json:"mds_folder"`
+	GitHubUsername    string          `json:"github_username"`
+	GitHubProfileName string          `json:"github_profile_name"`
+	GitHubHost        string          `json:"github_host"`
+	Favorites         map[string]bool `json:"favorites"`
+	Collapsed         map[string]bool `json:"collapsed"`
+	FavoritesTitle    string          `json:"favorites_title"`
 }
 
 type mode int
@@ -46,25 +49,27 @@ type repositoryListRow struct {
 }
 
 type model struct {
-	mode           mode
-	path           string
-	githubUsername string
-	setupStep      int
-	settingsCursor int
-	editingSetting string
-	settingInput   string
-	repositories   []string
-	favorites      map[string]bool
-	commitCounts   map[string]int
-	commitErrors   map[string]error
-	collapsed      map[string]bool
-	favoritesTitle string
-	editingTitle   bool
-	titleInput     string
-	cursor         int
-	err            error
-	width          int
-	height         int
+	mode              mode
+	path              string
+	githubUsername    string
+	githubProfileName string
+	githubHost        string
+	setupStep         int
+	settingsCursor    int
+	editingSetting    string
+	settingInput      string
+	repositories      []string
+	favorites         map[string]bool
+	commitCounts      map[string]int
+	commitErrors      map[string]error
+	collapsed         map[string]bool
+	favoritesTitle    string
+	editingTitle      bool
+	titleInput        string
+	cursor            int
+	err               error
+	width             int
+	height            int
 }
 
 var (
@@ -102,14 +107,14 @@ func newModel() (model, error) {
 	}
 
 	repositories, err := findRepositories(stored.MDSFolder)
-	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
+	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
 }
 
 func (m model) Init() tea.Cmd {
 	if m.mode != repositoriesMode {
 		return nil
 	}
-	return loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername)
+	return loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -161,7 +166,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if len(rows) > 0 {
 					m.activateRow(rows[m.cursor])
-					return m, loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername)
+					return m, loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost)
 				}
 			}
 			return m, nil
@@ -174,15 +179,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.setupStep == 0 && len(m.path) > 0 {
 				m.path = m.path[:len(m.path)-1]
 			}
-			if m.setupStep == 1 && len(m.githubUsername) > 0 {
-				m.githubUsername = m.githubUsername[:len(m.githubUsername)-1]
+			switch m.setupStep {
+			case 1:
+				m.githubUsername = removeLastRune(m.githubUsername)
+			case 2:
+				m.githubProfileName = removeLastRune(m.githubProfileName)
+			case 3:
+				m.githubHost = removeLastRune(m.githubHost)
 			}
 		default:
 			if msg.Type == tea.KeyRunes {
-				if m.setupStep == 0 {
+				switch m.setupStep {
+				case 0:
 					m.path += string(msg.Runes)
-				} else {
+				case 1:
 					m.githubUsername += string(msg.Runes)
+				case 2:
+					m.githubProfileName += string(msg.Runes)
+				case 3:
+					m.githubHost += string(msg.Runes)
 				}
 			}
 		}
@@ -215,18 +230,36 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	folder := strings.TrimSpace(m.path)
-	username := strings.TrimSpace(m.githubUsername)
-	if username == "" {
+	if m.setupStep == 1 && strings.TrimSpace(m.githubUsername) == "" {
 		m.err = errors.New("enter your GitHub username")
 		return m, nil
 	}
-	if err := saveConfig(config{MDSFolder: folder, GitHubUsername: username, Favorites: make(map[string]bool), Collapsed: make(map[string]bool)}); err != nil {
+	if m.setupStep == 2 && strings.TrimSpace(m.githubProfileName) == "" {
+		m.err = errors.New("enter your GitHub profile display name")
+		return m, nil
+	}
+	if m.setupStep < 3 {
+		m.setupStep++
+		m.err = nil
+		if m.setupStep == 3 && m.githubHost == "" {
+			m.githubHost = defaultGitHubHost
+		}
+		return m, nil
+	}
+	folder := strings.TrimSpace(m.path)
+	username := strings.TrimSpace(m.githubUsername)
+	profileName := strings.TrimSpace(m.githubProfileName)
+	host := normalizeGitHubHost(m.githubHost)
+	if host == "" {
+		m.err = errors.New("enter your GitHub host")
+		return m, nil
+	}
+	if err := saveConfig(config{MDSFolder: folder, GitHubUsername: username, GitHubProfileName: profileName, GitHubHost: host, Favorites: make(map[string]bool), Collapsed: make(map[string]bool)}); err != nil {
 		m.err = fmt.Errorf("save configuration: %w", err)
 		return m, nil
 	}
 	repositories, err := findRepositories(folder)
-	m.mode, m.path, m.githubUsername, m.repositories, m.favorites, m.collapsed, m.err = repositoriesMode, folder, username, repositories, make(map[string]bool), make(map[string]bool), err
+	m.mode, m.path, m.githubUsername, m.githubProfileName, m.githubHost, m.repositories, m.favorites, m.collapsed, m.err = repositoriesMode, folder, username, profileName, host, repositories, make(map[string]bool), make(map[string]bool), err
 	return m, nil
 }
 
@@ -246,6 +279,10 @@ func (m model) setupView() string {
 	label, value := "Location of UBC MDS folder:", m.path
 	if m.setupStep == 1 {
 		label, value = "GitHub username:", m.githubUsername
+	} else if m.setupStep == 2 {
+		label, value = "GitHub profile display name:", m.githubProfileName
+	} else if m.setupStep == 3 {
+		label, value = "GitHub host:", m.githubHost
 	}
 	lines := []string{titleStyle.Render("mds"), mutedStyle.Render("UBC MDS repository tracker"), "", "First-time setup", "", label, promptStyle.Render("> " + truncateLeft(value, max(1, width-3)) + "█")}
 	if m.err != nil {
@@ -257,9 +294,9 @@ func (m model) setupView() string {
 
 func (m model) settingsView() string {
 	width := m.contentWidth()
-	values := []string{"Workspace: " + m.path, "GitHub username: " + m.githubUsername}
+	values := settingsValues(m)
 	lines := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("Settings"), ""}
-	for index, value := range values {
+	for index, setting := range values {
 		prefix := "  "
 		if index == m.settingsCursor {
 			prefix = "▸ "
@@ -268,7 +305,7 @@ func (m model) settingsView() string {
 		if index == m.settingsCursor {
 			style = cursorStyle
 		}
-		lines = append(lines, style.Render(prefix+truncate(value, width)))
+		lines = append(lines, style.Render(prefix+truncate(setting.label+": "+setting.value, width)))
 	}
 	if m.editingSetting != "" {
 		lines = append(lines, "", promptStyle.Render("New value: "+truncateLeft(m.settingInput, max(1, width-12))+"█"), mutedStyle.Render("Enter save · Esc cancel"))
@@ -278,6 +315,21 @@ func (m model) settingsView() string {
 	}
 	lines = append(lines, "", mutedStyle.Render("↑/↓ select · Enter edit · Esc back · q quit"))
 	return m.fullScreen(lines)
+}
+
+type settingValue struct {
+	key   string
+	label string
+	value string
+}
+
+func settingsValues(m model) []settingValue {
+	return []settingValue{
+		{key: "workspace", label: "Workspace", value: m.path},
+		{key: "github", label: "GitHub username", value: m.githubUsername},
+		{key: "profile-name", label: "GitHub profile display name", value: m.githubProfileName},
+		{key: "host", label: "GitHub host", value: m.githubHost},
+	}
 }
 
 func (m model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -304,13 +356,10 @@ func (m model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		m.settingsCursor = max(0, m.settingsCursor-1)
 	case "down", "j":
-		m.settingsCursor = min(1, m.settingsCursor+1)
+		m.settingsCursor = min(len(settingsValues(m))-1, m.settingsCursor+1)
 	case "enter":
-		if m.settingsCursor == 0 {
-			m.editingSetting, m.settingInput = "workspace", m.path
-		} else {
-			m.editingSetting, m.settingInput = "github", m.githubUsername
-		}
+		setting := settingsValues(m)[m.settingsCursor]
+		m.editingSetting, m.settingInput = setting.key, setting.value
 	}
 	return m, nil
 }
@@ -342,8 +391,17 @@ func (m model) saveSetting() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.path, m.repositories = folder, repositories
-	} else {
+	} else if m.editingSetting == "github" {
 		m.githubUsername = value
+	} else if m.editingSetting == "profile-name" {
+		m.githubProfileName = value
+	} else {
+		host := normalizeGitHubHost(value)
+		if host == "" {
+			m.err = errors.New("GitHub host cannot be empty")
+			return m, nil
+		}
+		m.githubHost = host
 	}
 	m.editingSetting, m.settingInput, m.err = "", "", nil
 	m.savePreferences()
@@ -481,7 +539,7 @@ func (m *model) activateRow(row repositoryListRow) {
 }
 
 func (m *model) savePreferences() {
-	if err := saveConfig(config{MDSFolder: m.path, GitHubUsername: m.githubUsername, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle}); err != nil {
+	if err := saveConfig(config{MDSFolder: m.path, GitHubUsername: m.githubUsername, GitHubProfileName: m.githubProfileName, GitHubHost: m.githubHost, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle}); err != nil {
 		m.err = fmt.Errorf("save preferences: %w", err)
 	}
 }
@@ -638,7 +696,7 @@ func findRepositories(root string) ([]string, error) {
 	return repositories, nil
 }
 
-func loadTrackedCommitCounts(workspace string, repositories []string, favorites map[string]bool, username string) tea.Cmd {
+func loadTrackedCommitCounts(workspace string, repositories []string, favorites map[string]bool, username, profileName, configuredHost string) tea.Cmd {
 	return func() tea.Msg {
 		counts := make(map[string]int)
 		failures := make(map[string]error)
@@ -660,7 +718,11 @@ func loadTrackedCommitCounts(workspace string, repositories []string, favorites 
 				failures[repository] = errors.New("origin is not hosted on GitHub")
 				continue
 			}
-			count, err := githubCommitCount(host, owner, name, username)
+			if !strings.EqualFold(host, configuredHost) {
+				failures[repository] = fmt.Errorf("origin host %q does not match configured GitHub host %q", host, configuredHost)
+				continue
+			}
+			count, err := githubCommitCount(configuredHost, owner, name, username, profileName)
 			if err != nil {
 				failures[repository] = err
 				continue
@@ -725,11 +787,7 @@ type githubCommit struct {
 	} `json:"commit"`
 }
 
-func githubCommitCount(host, owner, repository, username string) (int, error) {
-	displayName, err := githubDisplayName(host, username)
-	if err != nil {
-		return 0, err
-	}
+func githubCommitCount(host, owner, repository, username, displayName string) (int, error) {
 	endpoint := fmt.Sprintf("repos/%s/%s/commits?per_page=100", owner, repository)
 	output, err := exec.Command("gh", "api", "--hostname", host, "--paginate", "--slurp", endpoint).CombinedOutput()
 	if err != nil {
@@ -755,14 +813,6 @@ func commitMatchesUser(commit githubCommit, username, displayName string) bool {
 		return true
 	}
 	return displayName != "" && strings.EqualFold(commit.Commit.Author.Name, displayName)
-}
-
-func githubDisplayName(host, username string) (string, error) {
-	output, err := exec.Command("gh", "api", "--hostname", host, "users/"+username, "--jq", ".name").CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("look up GitHub user: %s", strings.TrimSpace(string(output)))
-	}
-	return strings.TrimSpace(string(output)), nil
 }
 
 func configPath() (string, error) {
@@ -795,7 +845,30 @@ func loadConfig() (config, error) {
 	if stored.Collapsed == nil {
 		stored.Collapsed = make(map[string]bool)
 	}
+	stored.GitHubHost = configuredGitHubHost(stored.GitHubHost)
 	return stored, nil
+}
+
+func configuredGitHubHost(host string) string {
+	if normalized := normalizeGitHubHost(host); normalized != "" {
+		return normalized
+	}
+	return defaultGitHubHost
+}
+
+func normalizeGitHubHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimPrefix(host, "https://")
+	host = strings.TrimPrefix(host, "http://")
+	return strings.TrimSuffix(host, "/")
+}
+
+func removeLastRune(value string) string {
+	runes := []rune(value)
+	if len(runes) == 0 {
+		return value
+	}
+	return string(runes[:len(runes)-1])
 }
 
 func saveConfig(stored config) error {
