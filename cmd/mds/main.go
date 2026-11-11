@@ -398,7 +398,7 @@ func (m model) repositoriesView() string {
 				if count, ok := m.commitCounts[m.repositories[row.index]]; ok {
 					countText = fmt.Sprintf("%d commits", count)
 				} else if m.commitErrors[m.repositories[row.index]] != nil {
-					countText = "—"
+					countText = "GH ERROR"
 				}
 			}
 			prefix := indent + marker + " "
@@ -424,9 +424,21 @@ func (m model) repositoriesView() string {
 	if m.editingTitle {
 		lines = append(lines, "", promptStyle.Render("Rename tracking: "+truncate(m.titleInput, max(1, width-17))+"█"), mutedStyle.Render("Enter save · Esc cancel"))
 	}
+	if repository, err := m.firstCommitError(); err != nil {
+		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
+	}
 	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · e rename tracking · s settings · q quit", len(m.repositories))
 	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
+}
+
+func (m model) firstCommitError() (string, error) {
+	for _, repository := range m.repositories {
+		if err := m.commitErrors[repository]; err != nil {
+			return repository, err
+		}
+	}
+	return "", nil
 }
 
 func (m model) favoritesDisplayTitle() string {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -59,6 +60,14 @@ func TestSettingsUpdatesGitHubUsername(t *testing.T) {
 	}
 	if got, want := stored.GitHubUsername, "new-user"; got != want {
 		t.Fatalf("stored GitHub username = %q, want %q", got, want)
+	}
+}
+
+func TestTrackedRepositoryRendersCommitError(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 100, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitErrors: map[string]error{"511/lab-one": errors.New("gh auth login required")}, collapsed: map[string]bool{}}
+	view := m.repositoriesView()
+	if !strings.Contains(view, "GH ERROR") || !strings.Contains(view, "gh auth login required") {
+		t.Fatalf("expected the gh error to be visible, got %q", view)
 	}
 }
 
