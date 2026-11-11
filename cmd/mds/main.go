@@ -822,7 +822,7 @@ func (m model) repositoriesView() string {
 	if repository, err := m.firstCommitError(); err != nil {
 		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
-	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · f Finder · g GitHub · e rename tracking · s settings · q quit", len(m.repositories))
+	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · / search · f Finder · g GitHub · e rename tracking · s settings · q quit", len(m.repositories))
 	if m.githubActions {
 		footer = "GitHub actions · o open URL · c copy URL · Esc cancel"
 	} else if m.actionStatus != "" {

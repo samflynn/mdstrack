@@ -177,6 +177,13 @@ func TestTrackedRepositoryRendersCommitError(t *testing.T) {
 	}
 }
 
+func TestRepositoryFooterIncludesSearchShortcut(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 100, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	if view := m.repositoriesView(); !strings.Contains(view, "/ search") {
+		t.Fatalf("expected repository footer to include search shortcut, got %q", view)
+	}
+}
+
 func TestGitHubActionsMenuOpensForSelectedRepository(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
