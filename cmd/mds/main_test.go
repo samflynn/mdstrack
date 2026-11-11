@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestSetupAcceptsPastedPath(t *testing.T) {
@@ -155,6 +156,21 @@ func TestGitHubActionsMenuDoesNotOpenForGroupHeader(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	if updated.(model).githubActions {
 		t.Fatal("expected g on a group header to leave the GitHub actions menu closed")
+	}
+}
+
+func TestGitHubActionsMenuDoesNotOverflowTerminal(t *testing.T) {
+	repositories := make([]string, 20)
+	for index := range repositories {
+		repositories[index] = "511/repository-" + string(rune('a'+index))
+	}
+	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: repositories, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m = updated.(model)
+	if got, want := lipgloss.Height(m.repositoriesView()), m.viewportHeight(); got != want {
+		t.Fatalf("GitHub actions view height = %d, want terminal height %d", got, want)
 	}
 }
 
