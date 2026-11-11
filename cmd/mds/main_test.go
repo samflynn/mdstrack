@@ -178,8 +178,8 @@ func TestSearchOpensAndFiltersAccessibleRepositories(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, githubHost: "github.ubc.ca", searchResults: []githubSearchRepository{{FullName: "mds-2026-27/DSCI_511_lab1"}, {FullName: "mds-2026-27/DSCI_521_lab0"}, {FullName: "other/course"}}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	m = updated.(model)
-	if m.mode != searchMode || !m.searchLoading {
-		t.Fatal("expected slash to open the loading search page")
+	if m.mode != searchMode || !m.searchLoading || !m.hideCloned {
+		t.Fatal("expected slash to open search with cloned repositories hidden by default")
 	}
 	updated, _ = m.Update(githubSearchResultsMsg{repositories: m.searchResults})
 	m = updated.(model)
@@ -194,11 +194,6 @@ func TestSearchOpensAndFiltersAccessibleRepositories(t *testing.T) {
 	}
 	m.githubSearch = ""
 	m.clonedRepositories = map[string]bool{"mds-2026-27/DSCI_511_lab1": true}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
-	m = updated.(model)
-	if !m.hideCloned {
-		t.Fatal("expected h to hide cloned repositories")
-	}
 	results = m.filteredSearchResults()
 	if got, want := len(results), 2; got != want {
 		t.Fatalf("hidden-clone results = %#v, want %d repositories", results, want)
@@ -210,6 +205,14 @@ func TestSearchOpensAndFiltersAccessibleRepositories(t *testing.T) {
 	}
 	if view := m.searchView(); !strings.Contains(view, "h show cloned") {
 		t.Fatalf("expected search view to describe the active hide state, got %q", view)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	m = updated.(model)
+	if m.hideCloned {
+		t.Fatal("expected h to reveal cloned repositories")
+	}
+	if got, want := len(m.filteredSearchResults()), 3; got != want {
+		t.Fatalf("shown-clone results = %d, want %d", got, want)
 	}
 	if got, want := lipgloss.Height(m.searchView()), m.viewportHeight(); got != want {
 		t.Fatalf("search view height = %d, want terminal height %d", got, want)

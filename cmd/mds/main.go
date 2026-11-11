@@ -243,7 +243,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "/":
 				m.mode, m.githubSearch, m.searchCursor, m.searchError = searchMode, "", 0, nil
-				m.searchLoading = true
+				m.hideCloned, m.searchLoading = true, true
 				return m, tea.Batch(loadGitHubRepositories(m.githubHost), findClonedRepositories(m.path, m.repositories, m.githubHost))
 			case "s":
 				m.mode, m.err = settingsMode, nil
