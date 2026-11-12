@@ -270,6 +270,17 @@ func TestWideRepositoryViewIncludesNavigationRail(t *testing.T) {
 	}
 }
 
+func TestWideTrackedRowsFitWorkspacePanel(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 120, height: 40, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{"511/lab-one": 3}, collapsed: map[string]bool{}, lastRefresh: time.Now(), nextRefresh: time.Now().Add(5 * time.Minute)}
+	view := m.repositoriesView()
+	if strings.Contains(view, "\n  │  days left") {
+		t.Fatalf("wide tracked row wrapped its deadline outside the workspace panel: %q", view)
+	}
+	if !strings.Contains(view, "days left") || !strings.Contains(view, "3/3") {
+		t.Fatalf("wide tracked row lost deadline or progress information: %q", view)
+	}
+}
+
 func TestRepositoryActionMenusRenderAsCards(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}, editorActions: true}
 	view := m.repositoriesView()

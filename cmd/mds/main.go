@@ -1000,6 +1000,9 @@ func (m model) repositoriesView() string {
 		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
 	footer := fmt.Sprintf("%d repos · ↑↓ · Enter · / search · o open · g GitHub · ? help", len(m.repositories))
+	if m.viewportWidth() >= 100 {
+		footer = fmt.Sprintf("↑↓ · Enter · / search · ? help (%d repos)", len(m.repositories))
+	}
 	if m.localSearchActive {
 		footer = "/ " + m.localSearch + "█ · ↑/↓ move · Enter track · Esc clear search"
 	}
@@ -1204,7 +1207,9 @@ func (m model) navigationRail(width, height int) string {
 	}
 	lines = append(lines, "", mutedStyle.Render("STATUS"), promptStyle.Render(fmt.Sprintf("%d tracked", len(m.favorites))), mutedStyle.Render(fmt.Sprintf("%d repos", len(m.repositories))))
 	if m.mode == repositoriesMode {
-		lines = append(lines, "", mutedStyle.Render(truncate(m.refreshStatus(time.Now()), width-4)))
+		status := strings.Replace(m.refreshStatus(time.Now()), "Last ", "", 1)
+		status = strings.Replace(status, " · Next ", " · ", 1)
+		lines = append(lines, "", mutedStyle.Render(truncate(status, width-4)))
 	}
 	content := strings.Join(lines, "\n")
 	return railStyle.Width(width - 4).Height(max(1, height)).Render(content)
@@ -1225,6 +1230,11 @@ func (m model) viewportHeight() int {
 }
 
 func (m model) contentWidth() int {
+	if m.viewportWidth() >= 100 {
+		// The navigation rail consumes horizontal space, so repository rows must
+		// measure against the inner workspace panel rather than the viewport.
+		return max(1, m.viewportWidth()-39)
+	}
 	return max(1, m.viewportWidth()-10)
 }
 
