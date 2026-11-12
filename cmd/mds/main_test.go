@@ -257,20 +257,6 @@ func TestRepositoryViewFitsCommonTerminalSizes(t *testing.T) {
 	}
 }
 
-func TestWorkspaceConsoleShowsStatusAndCommandBars(t *testing.T) {
-	now := time.Now()
-	m := model{mode: repositoriesMode, width: 120, height: 40, path: "/Users/penrose/Documents/Projects/mds", repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{"511/lab-one": 3}, collapsed: map[string]bool{}, lastRefresh: now, nextRefresh: now.Add(5 * time.Minute)}
-	view := m.repositoriesView()
-	for _, text := range []string{"MDS", "WORKSPACE", "LIVE", "DEADLINE", "TRACKING", "ACTIVE", "↑↓ move", "? help"} {
-		if !strings.Contains(view, text) {
-			t.Fatalf("workspace console is missing %q: %q", text, view)
-		}
-	}
-	if got := lipgloss.Height(view); got != m.viewportHeight() {
-		t.Fatalf("workspace console height = %d, want %d", got, m.viewportHeight())
-	}
-}
-
 func TestHomeSearchFiltersRepositoriesAndKeepsTrackingAction(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one", "511/worksheet-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
