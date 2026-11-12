@@ -142,7 +142,7 @@ func TestRefreshIntervalSettingAndStatus(t *testing.T) {
 		t.Fatalf("refresh interval = %d, want %d", got, want)
 	}
 	m.lastRefresh, m.nextRefresh = now, now.Add(10*time.Minute)
-	if got := m.refreshStatus(now); !strings.Contains(got, "Last refresh 12:00") || !strings.Contains(got, "Next refresh in 10m 00s") {
+	if got := m.refreshStatus(now); !strings.Contains(got, "Last 12:00") || !strings.Contains(got, "Next 10:00") {
 		t.Fatalf("refresh status = %q", got)
 	}
 	if _, err := parseRefreshInterval("0"); err == nil {
@@ -221,8 +221,39 @@ func TestTrackedRepositoryRendersCommitError(t *testing.T) {
 func TestRepositoryFooterIncludesSearchShortcut(t *testing.T) {
 	now := time.Now()
 	m := model{mode: repositoriesMode, width: 100, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}, lastRefresh: now, nextRefresh: now.Add(5 * time.Minute)}
-	if view := m.repositoriesView(); !strings.Contains(view, "/ search") || !strings.Contains(view, "Last refresh") || !strings.Contains(view, "Next refresh in") {
-		t.Fatalf("expected repository footer to include search shortcut, got %q", view)
+	if view := m.repositoriesView(); !strings.Contains(view, "/ search") || !strings.Contains(view, "? help") || !strings.Contains(view, "Last ") || !strings.Contains(view, "Next ") {
+		t.Fatalf("expected repository footer to include search, help, and refresh shortcuts, got %q", view)
+	}
+}
+
+func TestHelpOverlayIsHeightCappedAndDismissible(t *testing.T) {
+	m := model{mode: repositoriesMode, width: 60, height: 16, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m = updated.(model)
+	if !m.helpVisible {
+		t.Fatal("expected question mark to open help")
+	}
+	if view := m.View(); !strings.Contains(view, "Keyboard shortcuts") || lipgloss.Height(view) != m.viewportHeight() {
+		t.Fatalf("expected height-capped help overlay, got %q", view)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(model).helpVisible {
+		t.Fatal("expected Esc to close help")
+	}
+}
+
+func TestRepositoryViewFitsCommonTerminalSizes(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{60, 16}, {80, 20}, {120, 40}} {
+		m := model{mode: repositoriesMode, width: size.width, height: size.height, repositories: []string{"511/a-very-long-repository-name-that-must-truncate-safely", "511/lab-two", "521/lab-three"}, favorites: map[string]bool{"511/lab-two": true}, commitCounts: map[string]int{"511/lab-two": 2}, collapsed: map[string]bool{}, lastRefresh: time.Now(), nextRefresh: time.Now().Add(5 * time.Minute)}
+		view := m.repositoriesView()
+		if got := lipgloss.Height(view); got != size.height {
+			t.Errorf("%dx%d view height = %d, want %d", size.width, size.height, got, size.height)
+		}
+		for _, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Errorf("%dx%d line width = %d, exceeds %d: %q", size.width, size.height, got, size.width, line)
+			}
+		}
 	}
 }
 

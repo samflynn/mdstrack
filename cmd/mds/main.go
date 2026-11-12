@@ -119,6 +119,7 @@ type model struct {
 	searchChooser          bool
 	localSearchActive      bool
 	localSearch            string
+	helpVisible            bool
 	actionStatus           string
 	githubSearch           string
 	searchResults          []githubSearchRepository
@@ -277,6 +278,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.mode != setupMode && !m.editingTitle && m.editingSetting == "") {
 			return m, tea.Quit
 		}
+		if m.helpVisible {
+			if msg.String() == "esc" || msg.String() == "?" {
+				m.helpVisible = false
+			}
+			return m, nil
+		}
 		if m.mode == settingsMode {
 			return m.updateSettings(msg)
 		}
@@ -330,6 +337,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			rows := m.repositoryListRows()
 			switch msg.String() {
+			case "?":
+				m.helpVisible = true
 			case "/":
 				m.searchChooser, m.actionStatus = true, ""
 			case "s":
@@ -463,6 +472,9 @@ func (m model) View() string {
 	case searchMode:
 		return m.searchView()
 	default:
+		if m.helpVisible {
+			return m.helpView()
+		}
 		return m.repositoriesView()
 	}
 }
@@ -859,6 +871,25 @@ func runRepositoryAction(command string, argument string) tea.Cmd {
 	}
 }
 
+func (m model) helpView() string {
+	width := m.contentWidth()
+	lines := []string{
+		titleStyle.Render("mds") + "  " + mutedStyle.Render("Keyboard shortcuts"),
+		"",
+		promptStyle.Render("Navigation") + "  ↑/↓ or j/k move · Enter track",
+		promptStyle.Render("Open") + "        o menu · v VS Code · p Positron · f Finder",
+		promptStyle.Render("GitHub") + "      g URL actions · o open · c copy",
+		promptStyle.Render("Search") + "      / chooser · l local · g GitHub",
+		promptStyle.Render("Settings") + "    s settings · e rename Tracking",
+		"",
+		mutedStyle.Render("? or Esc close · q quit"),
+	}
+	for index, line := range lines {
+		lines[index] = truncate(line, width)
+	}
+	return m.fullScreen(lines)
+}
+
 func (m model) repositoriesView() string {
 	width := m.contentWidth()
 	lines := []string{
@@ -950,7 +981,7 @@ func (m model) repositoriesView() string {
 	if repository, err := m.firstCommitError(); err != nil {
 		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
-	footer := fmt.Sprintf("%d repos · ↑/↓ move · Enter track · / search · o open · g GitHub · e rename tracking · s settings · q quit", len(m.repositories))
+	footer := fmt.Sprintf("%d repos · ↑↓ · Enter · / search · o open · g GitHub · ? help", len(m.repositories))
 	if m.localSearchActive {
 		footer = "/ " + m.localSearch + "█ · ↑/↓ move · Enter track · Esc clear search"
 	}
@@ -1455,7 +1486,7 @@ func (m model) refreshStatus(now time.Time) string {
 		return "Refresh pending"
 	}
 	remaining := max(0, int(m.nextRefresh.Sub(now).Seconds()))
-	return fmt.Sprintf("Last refresh %s · Next refresh in %dm %02ds", m.lastRefresh.Format("15:04"), remaining/60, remaining%60)
+	return fmt.Sprintf("Last %s · Next %d:%02d", m.lastRefresh.Format("15:04"), remaining/60, remaining%60)
 }
 
 func configuredGitHubHost(host string) string {
