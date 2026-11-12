@@ -137,15 +137,17 @@ type model struct {
 }
 
 var (
-	titleStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
-	mutedStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	titleStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51"))
+	mutedStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	errorStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	borderStyle         = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
 	promptStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 	selectedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
-	groupStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Italic(true)
-	favoriteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true).Bold(true)
-	cursorStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
+	groupStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
+	favoriteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
+	cursorStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
+	statusLiveStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
+	sectionRuleStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	commitSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 )
 
@@ -892,11 +894,7 @@ func (m model) helpView() string {
 
 func (m model) repositoriesView() string {
 	width := m.contentWidth()
-	lines := []string{
-		titleStyle.Render("mds") + "  " + mutedStyle.Render("UBC MDS repositories"),
-		mutedStyle.Render(truncate(m.path, width)),
-		"",
-	}
+	lines := m.workspaceHeader(width)
 	if m.err != nil {
 		lines = append(lines, errorStyle.Render(truncate("Unable to scan repositories: "+m.err.Error(), width)))
 	} else if len(m.repositories) == 0 {
@@ -907,7 +905,7 @@ func (m model) repositoriesView() string {
 		for index, row := range rows[start:end] {
 			selected := start+index == m.cursor
 			if row.key == "divider" {
-				lines = append(lines, mutedStyle.Render(strings.Repeat("─", width)))
+				lines = append(lines, sectionRuleStyle.Render(strings.Repeat("─", width)))
 				continue
 			}
 			indent := ""
@@ -915,23 +913,27 @@ func (m model) repositoriesView() string {
 				indent = "  "
 			}
 			if row.header {
-				prefix := "⌄ "
+				prefix := "└ "
 				if m.collapsed[row.key] {
 					prefix = "› "
 				}
-				label := indent + prefix + truncate(strings.ToUpper(row.group), width-len(indent)-3)
+				label := indent + prefix + strings.ToUpper(row.group)
+				if row.key == "favorites" {
+					label += fmt.Sprintf("  %d ACTIVE", m.trackedRepositoryCount())
+				}
+				label = truncate(label, width-len(indent)-3)
 				if selected {
 					lines = append(lines, cursorStyle.Render("▸ "+label))
 				} else if row.key == "favorites" {
-					lines = append(lines, favoriteStyle.Render("★ "+label))
+					lines = append(lines, favoriteStyle.Render("◆ "+label))
 				} else {
-					lines = append(lines, groupStyle.Render(label))
+					lines = append(lines, groupStyle.Render("◆ "+label))
 				}
 				continue
 			}
-			marker := "[ ]"
+			marker := "○"
 			if m.favorites[m.repositories[row.index]] {
-				marker = "[X]"
+				marker = "●"
 			}
 			countText := ""
 			deadlineText := ""
@@ -981,26 +983,66 @@ func (m model) repositoriesView() string {
 	if repository, err := m.firstCommitError(); err != nil {
 		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
-	footer := fmt.Sprintf("%d repos · ↑↓ · Enter · / search · o open · g GitHub · ? help", len(m.repositories))
+	footer := m.commandBar(width)
 	if m.localSearchActive {
-		footer = "/ " + m.localSearch + "█ · ↑/↓ move · Enter track · Esc clear search"
+		footer = "/ " + m.localSearch + "█  ·  ↑/↓ move  ·  Enter track  ·  Esc clear search"
 	}
 	if m.searchChooser {
-		footer = "Search · l local workspace · g GitHub repositories · Esc cancel"
+		footer = "SEARCH  ·  l local workspace  ·  g GitHub repositories  ·  Esc cancel"
 	} else if m.editorActions {
-		footer = "Open · v VS Code · p Positron · f Finder · Esc cancel"
+		footer = "OPEN  ·  v VS Code  ·  p Positron  ·  f Finder  ·  Esc cancel"
 	} else if m.githubActions {
-		footer = "GitHub actions · o open URL · c copy URL · Esc cancel"
+		footer = "GitHub actions  ·  o open URL  ·  c copy URL  ·  Esc cancel"
 	} else if m.actionStatus != "" {
 		footer = m.actionStatus
 	}
 	if !m.searchChooser && !m.editorActions && !m.githubActions && !m.localSearchActive && m.actionStatus == "" {
 		status := m.refreshStatus(time.Now())
 		footerWidth := max(1, width-lipgloss.Width(status)-2)
-		footer = truncate(footer, footerWidth) + strings.Repeat(" ", max(1, width-lipgloss.Width(truncate(footer, footerWidth))-lipgloss.Width(status))) + status
+		footer = m.commandBar(footerWidth)
+		footer = footer + strings.Repeat(" ", max(1, width-lipgloss.Width(footer)-lipgloss.Width(status))) + status
 	}
-	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
+	lines = append(lines, sectionRuleStyle.Render(strings.Repeat("─", width)), mutedStyle.Render(truncate(footer, width)))
 	return m.fullScreen(lines)
+}
+
+func (m model) workspaceHeader(width int) []string {
+	deadline := m.effectiveDeadline(time.Now()).Format("Mon 02 Jan")
+	live := statusLiveStyle.Render("● LIVE")
+	top := titleStyle.Render("MDS") + mutedStyle.Render("  /  WORKSPACE")
+	top = joinColumns(top, live, width)
+	refresh := m.refreshStatus(time.Now())
+	deadlineText := "  ·  DEADLINE " + deadline
+	pathWidth := max(1, width-lipgloss.Width(refresh)-lipgloss.Width(deadlineText)-1)
+	context := mutedStyle.Render(truncateLeft(m.path, pathWidth)) + mutedStyle.Render(deadlineText)
+	context = joinColumns(context, mutedStyle.Render(refresh), width)
+	return []string{top, context, sectionRuleStyle.Render(strings.Repeat("─", width))}
+}
+
+func (m model) commandBar(width int) string {
+	if width < 70 {
+		return truncate("↑↓ move  ·  Enter track  ·  / search  ·  ? help", width)
+	}
+	keys := []string{"↑↓ move", "Enter track", "/ search", "o open", "g GitHub", "? help"}
+	if width >= 100 {
+		keys = append(keys, "s settings")
+	}
+	return truncate(strings.Join(keys, "  ·  "), width)
+}
+
+func (m model) trackedRepositoryCount() int {
+	count := 0
+	for _, tracked := range m.favorites {
+		if tracked {
+			count++
+		}
+	}
+	return count
+}
+
+func joinColumns(left, right string, width int) string {
+	space := max(1, width-lipgloss.Width(left)-lipgloss.Width(right))
+	return left + strings.Repeat(" ", space) + right
 }
 
 func (m model) firstCommitError() (string, error) {
@@ -1124,7 +1166,9 @@ func (m model) moveCursor(rows []repositoryListRow, direction int) int {
 }
 
 func (m model) repositoryWindow(rows []repositoryListRow) (int, int) {
-	visible := max(1, m.contentHeight()-6)
+	// The console header, section rule, and persistent command bar reserve six
+	// lines around the scrolling repository region.
+	visible := max(1, m.contentHeight()-9)
 	cursorRow := min(m.cursor, max(0, len(rows)-1))
 	start := max(0, cursorRow-visible+1)
 	end := min(len(rows), start+visible)
