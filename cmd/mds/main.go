@@ -137,15 +137,19 @@ type model struct {
 }
 
 var (
-	titleStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
-	mutedStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	titleStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
+	mutedStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	errorStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	borderStyle         = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
+	borderStyle         = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
 	promptStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 	selectedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
 	groupStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Italic(true)
 	favoriteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true).Bold(true)
 	cursorStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
+	selectedRowStyle    = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	railStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("235")).Padding(1, 2)
+	railActiveStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Background(lipgloss.Color("237")).Bold(true).PaddingLeft(1)
+	dialogStyle         = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("141")).Padding(1, 2)
 	commitSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 )
 
@@ -489,7 +493,7 @@ func (m model) setupView() string {
 	} else if m.setupStep == 3 {
 		label, value = "GitHub host:", m.githubHost
 	}
-	lines := []string{titleStyle.Render("mds"), mutedStyle.Render("UBC MDS repository tracker"), "", "First-time setup", "", label, promptStyle.Render("> " + truncateLeft(value, max(1, width-3)) + "█")}
+	lines := []string{m.screenTitle("First-time setup"), mutedStyle.Render("Connect your workspace and GitHub identity."), "", promptStyle.Render(fmt.Sprintf("STEP %d OF 4", m.setupStep+1)), "", label, promptStyle.Render("> " + truncateLeft(value, max(1, width-3)) + "█")}
 	if m.err != nil {
 		lines = append(lines, "", errorStyle.Render(truncate("Error: "+m.err.Error(), width)))
 	}
@@ -515,7 +519,7 @@ func nextSaturday(day time.Time) time.Time {
 func (m model) settingsView() string {
 	width := m.contentWidth()
 	values := settingsValues(m)
-	lines := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("Settings"), ""}
+	lines := []string{m.screenTitle("Settings"), mutedStyle.Render("Workspace defaults and refresh behavior."), ""}
 	for index, setting := range values {
 		prefix := "  "
 		if index == m.settingsCursor {
@@ -584,7 +588,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) searchView() string {
 	width := m.contentWidth()
-	lines := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("GitHub repository search"), mutedStyle.Render("Accessible repositories on " + m.githubHost), "", promptStyle.Render("/ " + truncateLeft(m.githubSearch, max(1, width-3)) + "█")}
+	lines := []string{m.screenTitle("GitHub search"), mutedStyle.Render("Accessible repositories on " + m.githubHost), "", promptStyle.Render("/ " + truncateLeft(m.githubSearch, max(1, width-3)) + "█")}
 	if m.searchLoading {
 		lines = append(lines, "", mutedStyle.Render("Loading accessible repositories..."))
 	} else if m.searchError != nil {
@@ -874,15 +878,17 @@ func runRepositoryAction(command string, argument string) tea.Cmd {
 func (m model) helpView() string {
 	width := m.contentWidth()
 	lines := []string{
-		titleStyle.Render("mds") + "  " + mutedStyle.Render("Keyboard shortcuts"),
-		"",
-		promptStyle.Render("Navigation") + "  ↑/↓ or j/k move · Enter track",
-		promptStyle.Render("Open") + "        o menu · v VS Code · p Positron · f Finder",
-		promptStyle.Render("GitHub") + "      g URL actions · o open · c copy",
-		promptStyle.Render("Search") + "      / chooser · l local · g GitHub",
-		promptStyle.Render("Settings") + "    s settings · e rename Tracking",
+		titleStyle.Render("mds") + mutedStyle.Render("  /  Keyboard shortcuts"),
+		promptStyle.Render("NAVIGATE") + "   ↑/↓ or j/k move · Enter track",
+		promptStyle.Render("OPEN") + "       o menu · v VS Code · p Positron · f Finder",
+		promptStyle.Render("GITHUB") + "     g URL actions · o open · c copy",
+		promptStyle.Render("SEARCH") + "     / chooser · l local · g GitHub",
+		promptStyle.Render("MANAGE") + "     s settings · e rename Tracking",
 		"",
 		mutedStyle.Render("? or Esc close · q quit"),
+	}
+	if m.contentHeight() > 10 {
+		lines = append([]string{lines[0], mutedStyle.Render("Move through your workspace without leaving the terminal."), ""}, lines[1:]...)
 	}
 	for index, line := range lines {
 		lines[index] = truncate(line, width)
@@ -891,10 +897,19 @@ func (m model) helpView() string {
 }
 
 func (m model) repositoriesView() string {
+	if m.searchChooser {
+		return m.dialogView("Search", "Choose where to search", []string{"l  Local workspace", "g  GitHub repositories"}, "Esc cancel")
+	}
+	if m.editorActions {
+		return m.dialogView("Open", "Open the selected repository in", []string{"v VS Code", "p Positron", "f Finder"}, "Esc cancel")
+	}
+	if m.githubActions {
+		return m.dialogView("GitHub actions", "GitHub actions · repository link actions", []string{"o open URL", "c copy URL"}, "Esc cancel")
+	}
 	width := m.contentWidth()
 	lines := []string{
-		titleStyle.Render("mds") + "  " + mutedStyle.Render("UBC MDS repositories"),
-		mutedStyle.Render(truncate(m.path, width)),
+		m.screenTitle("Workspace"),
+		mutedStyle.Render("Repository cockpit  ·  " + truncateLeft(m.path, max(1, width-23))),
 		"",
 	}
 	if m.err != nil {
@@ -921,7 +936,7 @@ func (m model) repositoriesView() string {
 				}
 				label := indent + prefix + truncate(strings.ToUpper(row.group), width-len(indent)-3)
 				if selected {
-					lines = append(lines, cursorStyle.Render("▸ "+label))
+					lines = append(lines, selectedRowStyle.Width(width).Render(cursorStyle.Render("▸ "+label)))
 				} else if row.key == "favorites" {
 					lines = append(lines, favoriteStyle.Render("★ "+label))
 				} else {
@@ -969,6 +984,9 @@ func (m model) repositoriesView() string {
 			if rightText != "" {
 				rowText += strings.Repeat(" ", max(1, width-lipgloss.Width(rowText)-lipgloss.Width(rightText))) + rightText
 			}
+			if selected {
+				rowText = selectedRowStyle.Width(width).Render(rowText)
+			}
 			lines = append(lines, rowText)
 		}
 		if start > 0 || end < len(rows) {
@@ -985,16 +1003,10 @@ func (m model) repositoriesView() string {
 	if m.localSearchActive {
 		footer = "/ " + m.localSearch + "█ · ↑/↓ move · Enter track · Esc clear search"
 	}
-	if m.searchChooser {
-		footer = "Search · l local workspace · g GitHub repositories · Esc cancel"
-	} else if m.editorActions {
-		footer = "Open · v VS Code · p Positron · f Finder · Esc cancel"
-	} else if m.githubActions {
-		footer = "GitHub actions · o open URL · c copy URL · Esc cancel"
-	} else if m.actionStatus != "" {
+	if m.actionStatus != "" {
 		footer = m.actionStatus
 	}
-	if !m.searchChooser && !m.editorActions && !m.githubActions && !m.localSearchActive && m.actionStatus == "" {
+	if !m.localSearchActive && m.actionStatus == "" {
 		status := m.refreshStatus(time.Now())
 		footerWidth := max(1, width-lipgloss.Width(status)-2)
 		footer = truncate(footer, footerWidth) + strings.Repeat(" ", max(1, width-lipgloss.Width(truncate(footer, footerWidth))-lipgloss.Width(status))) + status
@@ -1142,12 +1154,60 @@ func repositoryGroup(repository string) (string, string) {
 	return parts[0], strings.Join(parts[1:], "/")
 }
 
+func (m model) screenTitle(section string) string {
+	return titleStyle.Render("mds") + mutedStyle.Render("  /  ") + promptStyle.Render(strings.ToUpper(section))
+}
+
+func (m model) dialogView(title, description string, options []string, footer string) string {
+	width := min(46, max(24, m.contentWidth()-8))
+	lines := []string{titleStyle.Render(strings.ToUpper(title)), mutedStyle.Render(truncate(description, width)), ""}
+	for _, option := range options {
+		lines = append(lines, promptStyle.Render(truncate(option, width)))
+	}
+	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
+	card := dialogStyle.Width(width).Render(strings.Join(lines, "\n"))
+	availableHeight := max(1, m.contentHeight())
+	paddingTop := max(0, (availableHeight-lipgloss.Height(card))/2)
+	return m.fullScreen([]string{strings.Repeat("\n", paddingTop) + card})
+}
+
 func (m model) fullScreen(lines []string) string {
 	width := m.viewportWidth()
 	height := m.viewportHeight()
 	content := strings.Join(lines, "\n")
+	if width >= 100 {
+		railWidth := 24
+		panelWidth := max(1, width-railWidth-9)
+		panel := borderStyle.Width(panelWidth).Height(max(1, height-4)).Render(content)
+		rail := m.navigationRail(railWidth, height-4)
+		return "\n" + lipgloss.NewStyle().PaddingLeft(2).Render(lipgloss.JoinHorizontal(lipgloss.Top, rail, " ", panel)) + "\n"
+	}
 	panel := borderStyle.Width(max(1, width-6)).Height(max(1, height-4)).Render(content)
 	return "\n" + lipgloss.NewStyle().PaddingLeft(2).Render(panel) + "\n"
+}
+
+func (m model) navigationRail(width, height int) string {
+	active := "WORKSPACE"
+	if m.mode == settingsMode {
+		active = "SETTINGS"
+	} else if m.mode == searchMode {
+		active = "GITHUB SEARCH"
+	}
+	items := []string{"WORKSPACE", "GITHUB SEARCH", "SETTINGS"}
+	lines := []string{titleStyle.Render("MDS"), mutedStyle.Render("WORKSPACE"), ""}
+	for _, item := range items {
+		if item == active {
+			lines = append(lines, railActiveStyle.Width(width-4).Render("● "+item))
+		} else {
+			lines = append(lines, mutedStyle.Render(item))
+		}
+	}
+	lines = append(lines, "", mutedStyle.Render("STATUS"), promptStyle.Render(fmt.Sprintf("%d tracked", len(m.favorites))), mutedStyle.Render(fmt.Sprintf("%d repos", len(m.repositories))))
+	if m.mode == repositoriesMode {
+		lines = append(lines, "", mutedStyle.Render(truncate(m.refreshStatus(time.Now()), width-4)))
+	}
+	content := strings.Join(lines, "\n")
+	return railStyle.Width(width - 4).Height(max(1, height)).Render(content)
 }
 
 func (m model) viewportWidth() int {
