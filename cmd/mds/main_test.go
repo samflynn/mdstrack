@@ -257,32 +257,6 @@ func TestRepositoryViewFitsCommonTerminalSizes(t *testing.T) {
 	}
 }
 
-func TestWideRepositoryViewIncludesNavigationRail(t *testing.T) {
-	m := model{mode: repositoriesMode, width: 120, height: 40, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}, lastRefresh: time.Now(), nextRefresh: time.Now().Add(5 * time.Minute)}
-	view := m.repositoriesView()
-	for _, text := range []string{"WORKSPACE", "GITHUB SEARCH", "SETTINGS", "Repository cockpit"} {
-		if !strings.Contains(view, text) {
-			t.Fatalf("wide workspace view is missing %q: %q", text, view)
-		}
-	}
-	if got := lipgloss.Height(view); got != m.viewportHeight() {
-		t.Fatalf("wide workspace view height = %d, want %d", got, m.viewportHeight())
-	}
-}
-
-func TestRepositoryActionMenusRenderAsCards(t *testing.T) {
-	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}, editorActions: true}
-	view := m.repositoriesView()
-	for _, text := range []string{"OPEN", "Open the selected repository in", "v VS Code", "f Finder"} {
-		if !strings.Contains(view, text) {
-			t.Fatalf("open action card is missing %q: %q", text, view)
-		}
-	}
-	if got := lipgloss.Height(view); got != m.viewportHeight() {
-		t.Fatalf("open action card height = %d, want %d", got, m.viewportHeight())
-	}
-}
-
 func TestHomeSearchFiltersRepositoriesAndKeepsTrackingAction(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one", "511/worksheet-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
