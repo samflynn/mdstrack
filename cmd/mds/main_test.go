@@ -600,6 +600,49 @@ func TestFavoritesTitleCanBeEditedAndPersists(t *testing.T) {
 	}
 }
 
+func TestGroupTitleCanBeEditedAndPersistsAcrossSections(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := model{mode: repositoriesMode, path: "/tmp/mds", repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(model)
+	if !m.editingTitle || m.editingGroup != "511" || m.titleInput != "511" {
+		t.Fatalf("group edit state = (%t, %q, %q), want editing 511", m.editingTitle, m.editingGroup, m.titleInput)
+	}
+	m.titleInput = "Data Science 511"
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.groupDisplayTitle("511"), "Data Science 511"; got != want {
+		t.Fatalf("group title = %q, want %q", got, want)
+	}
+	for _, row := range m.repositoryListRows() {
+		if row.header && row.rawGroup == "511" && row.group != "Data Science 511" {
+			t.Fatalf("renamed group row = %#v", row)
+		}
+	}
+	stored, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stored.GroupTitles["511"], "Data Science 511"; got != want {
+		t.Fatalf("stored group title = %q, want %q", got, want)
+	}
+}
+
+func TestClearingGroupTitleRestoresFolderName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := model{mode: repositoriesMode, path: "/tmp/mds", repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}, groupTitles: map[string]string{"511": "Data Science 511"}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(model)
+	m.titleInput = ""
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.groupDisplayTitle("511"), "511"; got != want {
+		t.Fatalf("group title after clear = %q, want %q", got, want)
+	}
+}
+
 func TestFavoritePersistence(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	want := config{MDSFolder: "/tmp/mds", GitHubProfileName: "Shrey Mudgal", GitHubHost: "github.ubc.ca", Favorites: map[string]bool{"511/lab-one": true}, Collapsed: map[string]bool{"favorites": true}, FavoritesTitle: "priority"}

@@ -23,15 +23,16 @@ const commitProgressWidth = 12
 const defaultRefreshIntervalMinutes = 5
 
 type config struct {
-	MDSFolder              string          `json:"mds_folder"`
-	GitHubUsername         string          `json:"github_username"`
-	GitHubProfileName      string          `json:"github_profile_name"`
-	GitHubHost             string          `json:"github_host"`
-	DeadlineOverride       string          `json:"deadline_override,omitempty"`
-	RefreshIntervalMinutes int             `json:"refresh_interval_minutes"`
-	Favorites              map[string]bool `json:"favorites"`
-	Collapsed              map[string]bool `json:"collapsed"`
-	FavoritesTitle         string          `json:"favorites_title"`
+	MDSFolder              string            `json:"mds_folder"`
+	GitHubUsername         string            `json:"github_username"`
+	GitHubProfileName      string            `json:"github_profile_name"`
+	GitHubHost             string            `json:"github_host"`
+	DeadlineOverride       string            `json:"deadline_override,omitempty"`
+	RefreshIntervalMinutes int               `json:"refresh_interval_minutes"`
+	Favorites              map[string]bool   `json:"favorites"`
+	Collapsed              map[string]bool   `json:"collapsed"`
+	FavoritesTitle         string            `json:"favorites_title"`
+	GroupTitles            map[string]string `json:"group_titles"`
 }
 
 type mode int
@@ -84,6 +85,7 @@ type githubSearchRepository struct {
 
 type repositoryListRow struct {
 	group      string
+	rawGroup   string
 	repository string
 	index      int
 	key        string
@@ -112,7 +114,9 @@ type model struct {
 	spinnerFrame           int
 	collapsed              map[string]bool
 	favoritesTitle         string
+	groupTitles            map[string]string
 	editingTitle           bool
+	editingGroup           string
 	titleInput             string
 	githubActions          bool
 	editorActions          bool
@@ -174,7 +178,7 @@ func newModel() (model, error) {
 	repositories, err := findRepositories(stored.MDSFolder)
 	now := time.Now()
 	refreshInterval := configuredRefreshInterval(stored.RefreshIntervalMinutes)
-	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), deadlineOverride: stored.DeadlineOverride, refreshIntervalMinutes: refreshInterval, lastRefresh: now, nextRefresh: now.Add(time.Duration(refreshInterval) * time.Minute), repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, err: err}, nil
+	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), deadlineOverride: stored.DeadlineOverride, refreshIntervalMinutes: refreshInterval, lastRefresh: now, nextRefresh: now.Add(time.Duration(refreshInterval) * time.Minute), repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, groupTitles: stored.GroupTitles, err: err}, nil
 }
 
 func (m model) Init() tea.Cmd {
@@ -318,10 +322,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.editingTitle {
 				switch msg.String() {
 				case "enter":
-					m.favoritesTitle = strings.TrimSpace(m.titleInput)
+					if m.editingGroup == "favorites" {
+						m.favoritesTitle = strings.TrimSpace(m.titleInput)
+					} else {
+						if m.groupTitles == nil {
+							m.groupTitles = make(map[string]string)
+						}
+						title := strings.TrimSpace(m.titleInput)
+						if title == "" {
+							delete(m.groupTitles, m.editingGroup)
+						} else {
+							m.groupTitles[m.editingGroup] = title
+						}
+					}
+					m.editingGroup = ""
 					m.editingTitle = false
 					m.savePreferences()
 				case "esc":
+					m.editingGroup = ""
 					m.editingTitle = false
 				case "backspace", "ctrl+h":
 					if len(m.titleInput) > 0 {
@@ -348,8 +366,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "down", "j":
 				m.cursor = m.moveCursor(rows, 1)
 			case "e":
-				if len(rows) > 0 && rows[m.cursor].key == "favorites" {
-					m.editingTitle, m.titleInput = true, m.favoritesDisplayTitle()
+				if len(rows) > 0 && rows[m.cursor].header {
+					row := rows[m.cursor]
+					if row.key == "favorites" {
+						m.editingGroup, m.editingTitle, m.titleInput = "favorites", true, m.favoritesTitle
+					} else {
+						m.editingGroup, m.editingTitle, m.titleInput = row.rawGroup, true, m.groupDisplayTitle(row.rawGroup)
+					}
 				}
 			case "o":
 				if _, ok := m.selectedRepository(rows); ok {
@@ -880,7 +903,7 @@ func (m model) helpView() string {
 		promptStyle.Render("Open") + "        o menu · v VS Code · p Positron · f Finder",
 		promptStyle.Render("GitHub") + "      g URL actions · o open · c copy",
 		promptStyle.Render("Search") + "      / chooser · l local · g GitHub",
-		promptStyle.Render("Settings") + "    s settings · e rename Tracking",
+		promptStyle.Render("Settings") + "    s settings · e rename selected header",
 		"",
 		mutedStyle.Render("? or Esc close · q quit"),
 	}
@@ -976,7 +999,11 @@ func (m model) repositoriesView() string {
 		}
 	}
 	if m.editingTitle {
-		lines = append(lines, "", promptStyle.Render("Rename tracking: "+truncate(m.titleInput, max(1, width-17))+"█"), mutedStyle.Render("Enter save · Esc cancel"))
+		label := "Rename tracking: "
+		if m.editingGroup != "favorites" {
+			label = "Rename group: "
+		}
+		lines = append(lines, "", promptStyle.Render(label+truncate(m.titleInput, max(1, width-len(label)))+"█"), mutedStyle.Render("Enter save · Esc cancel · empty restores the folder name"))
 	}
 	if repository, err := m.firstCommitError(); err != nil {
 		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
@@ -1019,6 +1046,13 @@ func (m model) favoritesDisplayTitle() string {
 	return strings.ToUpper(m.favoritesTitle) + " (TRACKING)"
 }
 
+func (m model) groupDisplayTitle(group string) string {
+	if title := strings.TrimSpace(m.groupTitles[group]); title != "" {
+		return title
+	}
+	return group
+}
+
 func (m *model) activateRow(row repositoryListRow) (string, bool) {
 	if row.key == "divider" {
 		return "", false
@@ -1058,7 +1092,7 @@ func (m *model) activateRow(row repositoryListRow) (string, bool) {
 }
 
 func (m *model) savePreferences() {
-	if err := saveConfig(config{MDSFolder: m.path, GitHubUsername: m.githubUsername, GitHubProfileName: m.githubProfileName, GitHubHost: m.githubHost, DeadlineOverride: m.deadlineOverride, RefreshIntervalMinutes: m.refreshIntervalMinutes, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle}); err != nil {
+	if err := saveConfig(config{MDSFolder: m.path, GitHubUsername: m.githubUsername, GitHubProfileName: m.githubProfileName, GitHubHost: m.githubHost, DeadlineOverride: m.deadlineOverride, RefreshIntervalMinutes: m.refreshIntervalMinutes, Favorites: m.favorites, Collapsed: m.collapsed, FavoritesTitle: m.favoritesTitle, GroupTitles: m.groupTitles}); err != nil {
 		m.err = fmt.Errorf("save preferences: %w", err)
 	}
 }
@@ -1088,22 +1122,26 @@ func (m model) repositoryListRows() []repositoryListRow {
 	if len(favorites) > 0 {
 		rows = append(rows, repositoryListRow{group: m.favoritesDisplayTitle(), key: "favorites", header: true})
 		if !m.collapsed["favorites"] {
-			rows = appendGroupedRepositoryRows(rows, m.repositories, favorites, "favorite:", m.collapsed)
+			rows = appendGroupedRepositoryRows(rows, m.repositories, favorites, "favorite:", m.collapsed, m.groupTitles)
 		}
 		if len(regular) > 0 {
 			rows = append(rows, repositoryListRow{key: "divider"})
 		}
 	}
-	return appendGroupedRepositoryRows(rows, m.repositories, regular, "group:", m.collapsed)
+	return appendGroupedRepositoryRows(rows, m.repositories, regular, "group:", m.collapsed, m.groupTitles)
 }
 
-func appendGroupedRepositoryRows(rows []repositoryListRow, repositories []string, indexes []int, prefix string, collapsed map[string]bool) []repositoryListRow {
+func appendGroupedRepositoryRows(rows []repositoryListRow, repositories []string, indexes []int, prefix string, collapsed map[string]bool, groupTitles map[string]string) []repositoryListRow {
 	previousGroup := ""
 	for _, index := range indexes {
 		group, name := repositoryGroup(repositories[index])
 		key := prefix + group
 		if group != previousGroup {
-			rows = append(rows, repositoryListRow{group: group, key: key, header: true})
+			displayGroup := group
+			if title := strings.TrimSpace(groupTitles[group]); title != "" {
+				displayGroup = title
+			}
+			rows = append(rows, repositoryListRow{group: displayGroup, rawGroup: group, key: key, header: true})
 			previousGroup = group
 		}
 		if !collapsed[key] {
