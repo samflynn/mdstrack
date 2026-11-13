@@ -1447,8 +1447,10 @@ func (m model) repositoryFooter(width int) string {
 		return m.helpModel(width).ShortHelpView(repoKeys.ShortHelp())
 	}
 	// The legend is built to the width it actually gets, so Bubbles elides it
-	// itself rather than rendering past the row and being cut mid-word.
+	// rather than letting it run into the status. It can still overshoot by a
+	// few cells, so the result is measured and clipped to the space left.
 	legend := m.helpModel(legendWidth).ShortHelpView(repoKeys.ShortHelp())
+	legend = truncate(legend, legendWidth)
 	return legend + strings.Repeat(" ", max(1, width-lipgloss.Width(legend)-statusWidth)) + status
 }
 

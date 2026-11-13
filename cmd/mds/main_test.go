@@ -219,6 +219,37 @@ func TestTrackedRepositoryRendersCommitError(t *testing.T) {
 	}
 }
 
+// TestRepositoryFooterKeepsCountdownIntact guards a Bubbles quirk: ShortHelpView
+// can return a legend wider than the width it was given, which previously pushed
+// the refresh countdown off the row. The countdown must either appear in full or
+// be dropped deliberately, never shown half-eaten.
+func TestRepositoryFooterKeepsCountdownIntact(t *testing.T) {
+	const status = "Last 23:10 · Next 4:59"
+	build := func(width int) model {
+		return model{
+			mode: repositoriesMode, width: width, height: 24, path: "/tmp/mds",
+			repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true},
+			commitCounts: map[string]int{"511/lab-one": 3}, collapsed: map[string]bool{},
+			lastRefresh: time.Date(2026, 11, 12, 23, 10, 0, 0, time.Local),
+			nextRefresh: time.Date(2026, 11, 12, 23, 15, 0, 0, time.Local),
+			now:         time.Date(2026, 11, 12, 23, 10, 1, 0, time.Local),
+		}
+	}
+	for width := 24; width <= 130; width++ {
+		m := build(width)
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 24})
+		lines := strings.Split(updated.(model).View(), "\n")
+		last := lines[len(lines)-1]
+		if got := lipgloss.Width(last); got != width {
+			t.Errorf("width %d: footer is %d cells, want %d", width, got, width)
+		}
+		footer := ansi.Strip(last)
+		if strings.Contains(footer, "Next") && !strings.Contains(footer, status) {
+			t.Errorf("width %d: countdown truncated to %q", width, strings.TrimRight(footer, " "))
+		}
+	}
+}
+
 func TestRepositoryFooterIncludesSearchShortcut(t *testing.T) {
 	now := time.Now()
 	m := model{mode: repositoriesMode, width: 100, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}, lastRefresh: now, nextRefresh: now.Add(5 * time.Minute)}
