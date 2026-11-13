@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestSetupAcceptsPastedPath(t *testing.T) {
@@ -218,6 +219,37 @@ func TestTrackedRepositoryRendersCommitError(t *testing.T) {
 	}
 }
 
+// TestRepositoryFooterKeepsCountdownIntact guards a Bubbles quirk: ShortHelpView
+// can return a legend wider than the width it was given, which previously pushed
+// the refresh countdown off the row. The countdown must either appear in full or
+// be dropped deliberately, never shown half-eaten.
+func TestRepositoryFooterKeepsCountdownIntact(t *testing.T) {
+	const status = "Last 23:10 · Next 4:59"
+	build := func(width int) model {
+		return model{
+			mode: repositoriesMode, width: width, height: 24, path: "/tmp/mds",
+			repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true},
+			commitCounts: map[string]int{"511/lab-one": 3}, collapsed: map[string]bool{},
+			lastRefresh: time.Date(2026, 11, 12, 23, 10, 0, 0, time.Local),
+			nextRefresh: time.Date(2026, 11, 12, 23, 15, 0, 0, time.Local),
+			now:         time.Date(2026, 11, 12, 23, 10, 1, 0, time.Local),
+		}
+	}
+	for width := 24; width <= 130; width++ {
+		m := build(width)
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 24})
+		lines := strings.Split(updated.(model).View(), "\n")
+		last := lines[len(lines)-1]
+		if got := lipgloss.Width(last); got != width {
+			t.Errorf("width %d: footer is %d cells, want %d", width, got, width)
+		}
+		footer := ansi.Strip(last)
+		if strings.Contains(footer, "Next") && !strings.Contains(footer, status) {
+			t.Errorf("width %d: countdown truncated to %q", width, strings.TrimRight(footer, " "))
+		}
+	}
+}
+
 func TestRepositoryFooterIncludesSearchShortcut(t *testing.T) {
 	now := time.Now()
 	m := model{mode: repositoriesMode, width: 100, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}, lastRefresh: now, nextRefresh: now.Add(5 * time.Minute)}
@@ -242,16 +274,62 @@ func TestHelpOverlayIsHeightCappedAndDismissible(t *testing.T) {
 	}
 }
 
-func TestRepositoryViewFitsCommonTerminalSizes(t *testing.T) {
-	for _, size := range []struct{ width, height int }{{60, 16}, {80, 20}, {120, 40}} {
-		m := model{mode: repositoriesMode, width: size.width, height: size.height, repositories: []string{"511/a-very-long-repository-name-that-must-truncate-safely", "511/lab-two", "521/lab-three"}, favorites: map[string]bool{"511/lab-two": true}, commitCounts: map[string]int{"511/lab-two": 2}, collapsed: map[string]bool{}, lastRefresh: time.Now(), nextRefresh: time.Now().Add(5 * time.Minute)}
-		view := m.repositoriesView()
-		if got := lipgloss.Height(view); got != size.height {
-			t.Errorf("%dx%d view height = %d, want %d", size.width, size.height, got, size.height)
+// TestEveryScreenFitsTheTerminal pins the layout contract: whatever the state
+// or the size, a screen renders exactly the terminal's row count and never
+// exceeds its column count. This is what stops a long name, an extra status
+// line, or a taller header from silently pushing the footer off screen.
+func TestEveryScreenFitsTheTerminal(t *testing.T) {
+	sizes := []struct{ width, height int }{{24, 6}, {30, 8}, {40, 10}, {60, 16}, {80, 20}, {120, 40}, {200, 60}}
+	base := func() model {
+		return model{
+			mode: repositoriesMode, path: "/tmp/mds", githubUsername: "u", githubProfileName: "n", githubHost: "github.com",
+			repositories: []string{"511/lab-one", "511/a-very-long-repository-name-that-must-truncate-safely", "521/lab-three", "521/lab-four"},
+			favorites:    map[string]bool{"511/lab-one": true, "521/lab-three": true, "521/lab-four": true},
+			commitCounts: map[string]int{"511/lab-one": 3, "521/lab-three": 1},
+			commitErrors: map[string]error{"521/lab-four": errors.New("boom")},
+			collapsed:    map[string]bool{}, groupTitles: map[string]string{"511": "DSCI 511"},
 		}
-		for _, line := range strings.Split(view, "\n") {
-			if got := lipgloss.Width(line); got > size.width {
-				t.Errorf("%dx%d line width = %d, exceeds %d: %q", size.width, size.height, got, size.width, line)
+	}
+	states := map[string]func() model{
+		"repositories":   base,
+		"local search":   func() model { m := base(); m.localSearchActive, m.localSearch = true, "lab"; return m },
+		"search chooser": func() model { m := base(); m.searchChooser = true; return m },
+		"editor actions": func() model { m := base(); m.editorActions = true; return m },
+		"github actions": func() model { m := base(); m.githubActions = true; return m },
+		"status":         func() model { m := base(); m.actionStatus = "Copied GitHub URL"; return m },
+		"renaming":       func() model { m := base(); m.editingTitle, m.titleInput = true, "My Group"; return m },
+		"settings": func() model {
+			m := base()
+			m.mode, m.editingSetting, m.settingInput = settingsMode, "profile-name", "Shrey Mudgal"
+			return m
+		},
+		"setup":          func() model { m := base(); m.mode, m.setupStep = setupMode, 2; return m },
+		"search":         func() model { m := base(); m.mode, m.githubSearch = searchMode, "abc"; return m },
+		"search loading": func() model { m := base(); m.mode, m.searchLoading = searchMode, true; return m },
+		"search error":   func() model { m := base(); m.mode, m.searchError = searchMode, errors.New("boom"); return m },
+		"clone folder": func() model {
+			m := base()
+			m.mode, m.cloneConfirmation, m.enteringCloneFolder, m.cloneFolderInput = searchMode, "a/b", true, "week-one"
+			return m
+		},
+		"clone confirm":   func() model { m := base(); m.mode, m.cloneConfirmation = searchMode, "a/b"; return m },
+		"help":            func() model { m := base(); m.helpVisible = true; return m },
+		"scan error":      func() model { m := base(); m.err = errors.New("boom"); return m },
+		"no repositories": func() model { m := base(); m.repositories = nil; return m },
+		"loading commits": func() model { m := base(); m.loadingCommits = true; return m },
+	}
+	for _, size := range sizes {
+		for name, build := range states {
+			m := build()
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+			view := updated.(model).View()
+			if got := lipgloss.Height(view); got != size.height {
+				t.Errorf("%s at %dx%d: height = %d, want %d", name, size.width, size.height, got, size.height)
+			}
+			for index, line := range strings.Split(view, "\n") {
+				if got := lipgloss.Width(line); got > size.width {
+					t.Errorf("%s at %dx%d: line %d width = %d, exceeds %d", name, size.width, size.height, index, got, size.width)
+				}
 			}
 		}
 	}
@@ -554,6 +632,68 @@ func TestCommitProgressBarCapsAtThreeSegments(t *testing.T) {
 	}
 }
 
+func TestTextFieldsShowTailOfLongValues(t *testing.T) {
+	// Inputs keep the caret at the end, so a value that does not fit must show
+	// its tail: the part being typed is the part worth seeing.
+	m := model{mode: setupMode, width: 30, height: 10, path: "/Users/penrose/Documents/MDS"}
+	view := m.setupView()
+	if !strings.Contains(view, "…ers/penrose/Documents/MDS") {
+		t.Fatalf("expected the setup path to show its tail, got %q", view)
+	}
+	if strings.Contains(view, "/Users/penrose/Do") {
+		t.Fatalf("expected the setup path to be trimmed from the left, got %q", view)
+	}
+}
+
+func TestCommitProgressBarIsPlainUnderNoColor(t *testing.T) {
+	// The bar is the densest colour carrier in the list, so it must survive a
+	// colourless terminal: glyphs alone have to communicate the magnitude.
+	for _, count := range []int{0, 1, 2, 3, 5} {
+		if got := lipgloss.Width(commitProgressBar(count)); got != commitProgressWidth {
+			t.Errorf("commitProgressBar(%d) width = %d, want %d", count, got, commitProgressWidth)
+		}
+	}
+	if got, want := ansi.Strip(commitProgressBar(3)), "████████████"; got != want {
+		t.Errorf("stripped commitProgressBar(3) = %q, want %q", got, want)
+	}
+}
+
+func TestStatusMessagesExpireOnceAndAreNotClearedEarly(t *testing.T) {
+	// A transient status must not outlive its timer, and a newer status must not
+	// be wiped by the older status' still-pending timer.
+	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+
+	updated, cmd := m.Update(repositoryActionMsg{err: errors.New("first")})
+	m = updated.(model)
+	if m.actionStatus != "Action failed: first" {
+		t.Fatalf("actionStatus = %q, want %q", m.actionStatus, "Action failed: first")
+	}
+	if cmd == nil {
+		t.Fatal("expected a status to arm an expiry timer")
+	}
+	firstToken := m.statusToken
+
+	updated, _ = m.Update(repositoryActionMsg{err: errors.New("second")})
+	m = updated.(model)
+	if m.statusToken == firstToken {
+		t.Fatal("expected a newer status to take ownership of the timer")
+	}
+
+	// The stale timer from "first" must be ignored.
+	updated, _ = m.Update(statusExpiryMsg{token: firstToken})
+	m = updated.(model)
+	if m.actionStatus != "Action failed: second" {
+		t.Fatalf("stale timer cleared the newer status: actionStatus = %q", m.actionStatus)
+	}
+
+	// The current timer clears it.
+	updated, _ = m.Update(statusExpiryMsg{token: m.statusToken})
+	m = updated.(model)
+	if m.actionStatus != "" {
+		t.Fatalf("current timer left actionStatus = %q, want empty", m.actionStatus)
+	}
+}
+
 func TestTrackedRepositoryRendersCommitProgress(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{"511/lab-one": 5}, collapsed: map[string]bool{}}
 	if view := m.repositoriesView(); !strings.Contains(view, "5/3") || strings.Index(view, "████████████") > strings.Index(view, "5/3") {
@@ -579,6 +719,28 @@ func TestTruncateForTerminalWidth(t *testing.T) {
 	}
 	if got, want := truncateLeft("/Users/penrose/Documents/MDS", 12), "…cuments/MDS"; got != want {
 		t.Fatalf("truncateLeft() = %q, want %q", got, want)
+	}
+	// Wide (CJK) and emoji runes occupy two cells, so a cell budget must not be
+	// treated as a rune budget or the line overflows the terminal.
+	for _, tc := range []struct {
+		name  string
+		value string
+		width int
+	}{
+		{"cjk", "课程一/lab-one", 8},
+		{"emoji", "lab-🎉-one", 7},
+		{"mixed", "資料/DSCI_511_😀", 6},
+	} {
+		for _, got := range []string{truncate(tc.value, tc.width), truncateLeft(tc.value, tc.width)} {
+			if w := lipgloss.Width(got); w > tc.width {
+				t.Errorf("%s: %q renders %d cells, exceeds %d", tc.name, got, w, tc.width)
+			}
+		}
+	}
+	// Styled input must be measured by its visible text, not its escape codes.
+	styled := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true).Render("repository-name")
+	if got := lipgloss.Width(truncate(styled, 8)); got > 8 {
+		t.Errorf("styled truncate() renders %d cells, exceeds 8", got)
 	}
 }
 
@@ -711,5 +873,383 @@ func TestFindRepositoriesFindsAndSortsNestedRepositories(t *testing.T) {
 	want := []string{"course/week-one/project", "zeta"}
 	if !reflect.DeepEqual(repositories, want) {
 		t.Fatalf("findRepositories() = %v, want %v", repositories, want)
+	}
+}
+
+// scrollingModel builds a list of nine repositories in three groups with two
+// tracked repositories that live in different groups, so the tracked block
+// contains a group header for each of them. Width 64 height 14 leaves ten body
+// rows for sixteen list rows, which is enough for the block to pin and for the
+// rest to scroll.
+func scrollingModel() model {
+	repositories := []string{}
+	for _, lab := range []string{"lab-1", "lab-2", "lab-3"} {
+		for _, name := range []string{"a", "b", "c"} {
+			repositories = append(repositories, "DSCI_511_"+lab+"/"+name)
+		}
+	}
+	repositories = append(repositories, "DSCI_522_lab-1/a", "DSCI_522_lab-2/b", "DSCI_522_lab-3/c")
+	m := model{
+		mode: repositoriesMode, width: 64, height: 14, now: time.Now(),
+		repositories: repositories, favorites: map[string]bool{}, collapsed: map[string]bool{},
+		groupTitles:    map[string]string{},
+		favoritesTitle: "Priority",
+		commitCounts:   map[string]int{},
+		commitErrors:   map[string]error{},
+	}
+	m.favorites[repositories[0]] = true
+	m.favorites[repositories[4]] = true
+	return m
+}
+
+// bodyLines returns the rendered body of the repositories screen, which is
+// everything between the accent rule and the footer.
+func bodyLines(t *testing.T, m model) []string {
+	t.Helper()
+	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("view has %d lines, want at least 4", len(lines))
+	}
+	return lines[2 : len(lines)-1]
+}
+
+// cursorBodyLine returns the body row the selection marker is drawn on. Rows
+// are rendered inside the gutter, so leading spaces are trimmed before looking
+// for the marker.
+func cursorBodyLine(t *testing.T, m model) int {
+	t.Helper()
+	for index, line := range bodyLines(t, m) {
+		if strings.HasPrefix(strings.TrimLeft(line, " "), "▸") {
+			return index
+		}
+	}
+	return -1
+}
+
+// TestRepositoryScrollingDoesNotPinTheSelectionToTheTop is the regression guard
+// for the reported behaviour: pressing down used to keep the selected row at
+// the top of the screen and scroll everything above it out of view instead of
+// moving the selection down the list.
+func TestRepositoryScrollingDoesNotPinTheSelectionToTheTop(t *testing.T) {
+	m := scrollingModel()
+	if m.scrollTop != 0 {
+		t.Fatalf("initial scrollTop = %d, want 0", m.scrollTop)
+	}
+	seen := map[int]bool{}
+	for step := 0; step < 12; step++ {
+		if line := cursorBodyLine(t, m); line >= 0 {
+			seen[line] = true
+		}
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updated.(model)
+	}
+	if len(seen) < 3 {
+		t.Fatalf("selection appeared on body lines %v; it must move down the window rather than staying pinned", seen)
+	}
+}
+
+// TestTrackedSectionStaysVisibleWhileScrolling checks that the whole tracking
+// block, including a group header per tracked repository, is present at every
+// scroll offset.
+func TestTrackedSectionStaysVisibleWhileScrolling(t *testing.T) {
+	m := scrollingModel()
+	rows := m.repositoryListRows()
+	pinned := m.pinnedRowCount(rows)
+	if pinned < 4 {
+		t.Fatalf("pinnedRowCount = %d, want the header, group headers and repositories for both tracked repos", pinned)
+	}
+	for step := 0; step < 16; step++ {
+		body := strings.Join(bodyLines(t, m), "\n")
+		if !strings.Contains(body, "PRIORITY (TRACKING)") {
+			t.Fatalf("step %d: tracking title missing from the body:\n%s", step, body)
+		}
+		for _, repository := range m.repositories {
+			if !m.favorites[repository] {
+				continue
+			}
+			_, name := repositoryGroup(repository)
+			if !strings.Contains(body, name) {
+				t.Fatalf("step %d: tracked repository %s missing from the body:\n%s", step, name, body)
+			}
+		}
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updated.(model)
+	}
+}
+
+// TestSelectionStaysInsideTheWindowAtEveryHeight guards the small-terminal
+// cases: the selection must always be rendered, whether the tracked block is
+// pinned or the list has fallen back to plain scrolling.
+func TestSelectionStaysInsideTheWindowAtEveryHeight(t *testing.T) {
+	for _, height := range []int{6, 8, 10, 12, 14, 20, 40} {
+		m := scrollingModel()
+		m.height = height
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 64, Height: height})
+		m = updated.(model)
+		rows := m.repositoryListRows()
+		for step := 0; step < len(rows)+2; step++ {
+			view := m.View()
+			if got := lipgloss.Height(view); got != height {
+				t.Fatalf("height %d step %d: rendered %d rows", height, step, got)
+			}
+			if cursorBodyLine(t, m) < 0 {
+				t.Fatalf("height %d step %d: cursor row is not visible:\n%s", height, step, ansi.Strip(view))
+			}
+			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+			m = updated.(model)
+		}
+	}
+}
+
+// TestWithoutTrackedRepositoriesNothingIsPinned keeps the plain list free of a
+// pinned block: with no favourites there is no tracking section to hold still.
+func TestWithoutTrackedRepositoriesNothingIsPinned(t *testing.T) {
+	m := scrollingModel()
+	m.favorites = map[string]bool{}
+	if got := m.pinnedRowCount(m.repositoryListRows()); got != 0 {
+		t.Fatalf("pinnedRowCount with no favourites = %d, want 0", got)
+	}
+	for step := 0; step < 6; step++ {
+		if cursorBodyLine(t, m) < 0 {
+			t.Fatalf("step %d: cursor row is not visible", step)
+		}
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updated.(model)
+	}
+}
+
+// TestTrackedBlockTooLargeFallsBackToScrolling covers a small terminal whose
+// body cannot hold the tracked block and a scrolled row at once. Pinning the
+// block there would leave nowhere to draw the selection, so the list has to
+// scroll normally instead.
+func TestTrackedBlockTooLargeFallsBackToScrolling(t *testing.T) {
+	m := scrollingModel()
+	// Track most of the list so the block far exceeds any small body.
+	for _, repository := range m.repositories {
+		m.favorites[repository] = true
+	}
+	m.height = 8
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 64, Height: 8})
+	m = updated.(model)
+	if got := m.pinnedRowCount(m.repositoryListRows()); got != 0 {
+		t.Fatalf("pinnedRowCount = %d, want 0 so the list can scroll", got)
+	}
+	for step := 0; step < 14; step++ {
+		if cursorBodyLine(t, m) < 0 {
+			t.Fatalf("step %d: cursor row is not visible:\n%s", step, ansi.Strip(m.View()))
+		}
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updated.(model)
+	}
+}
+
+// TestScrollIsRecomputedWhenTheRowSetChanges ensures a stale window cannot
+// survive a change that removes rows, such as collapsing a group or filtering.
+func TestScrollIsRecomputedWhenTheRowSetChanges(t *testing.T) {
+	m := scrollingModel()
+	for step := 0; step < 16; step++ {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updated.(model)
+	}
+	if m.scrollTop == 0 {
+		t.Fatal("expected the window to have advanced before filtering")
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m = updated.(model)
+	for _, r := range "zzz-no-match" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model)
+	}
+	if !m.localSearchActive {
+		t.Fatal("expected the local search to be active")
+	}
+	if got := len(m.repositoryListRows()); got != 0 {
+		t.Fatalf("a non-matching filter should empty the list, got %d rows", got)
+	}
+	if m.scrollTop != 0 {
+		t.Fatalf("scrollTop after filtering to no rows = %d, want 0", m.scrollTop)
+	}
+}
+
+// --- Request 7: rename prompt visibility, caret blink, count fallback, legend ---
+
+// editorModel returns a repositories screen with the rename editor open and the
+// given value already typed.
+func editorModel(height int, value string) model {
+	m := model{
+		mode: repositoriesMode, width: 72, height: height, path: "/tmp/mds",
+		repositories:   []string{"511/lab-one", "511/lab-two", "522/lab-three"},
+		favorites:      map[string]bool{},
+		collapsed:      map[string]bool{},
+		groupTitles:    map[string]string{},
+		commitCounts:   map[string]int{},
+		commitErrors:   map[string]error{},
+		editingTitle:   true,
+		titleNameInput: newTextValue("Group name: "),
+		titleInput:     value,
+	}
+	return m
+}
+
+// TestRenamePromptStaysVisibleOnShortTerminals is the regression guard for the
+// reported "I cannot see what I type" behaviour. The body is a fixed height and
+// the row list used to consume all of it, so the prompt was the first line the
+// block dropped.
+func TestRenamePromptStaysVisibleOnShortTerminals(t *testing.T) {
+	for _, height := range []int{4, 6, 8, 10, 14, 24} {
+		m := editorModel(height, "Renamed Group")
+		view := ansi.Strip(m.View())
+		if !strings.Contains(view, "Renamed Group") {
+			t.Errorf("height %d: typed value missing from view %q", height, view)
+		}
+		if !strings.Contains(view, "Rename group:") {
+			t.Errorf("height %d: rename prompt missing from view %q", height, view)
+		}
+	}
+}
+
+// TestTypedRenameTextIsVisibleWhileEditing types through the real Update path so
+// the rendered value is the one the input actually holds.
+func TestTypedRenameTextIsVisibleWhileEditing(t *testing.T) {
+	m := editorModel(8, "")
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(model)
+	for _, r := range "Renamed" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model)
+	}
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "Renamed") {
+		t.Fatalf("typed text missing from view %q", view)
+	}
+}
+
+// TestCaretBlinksWhileRenaming drives the timer the app owns. The caret glyph
+// must alternate between the visible block and a blank cell, and a tick left
+// over from a closed editor must not touch anything.
+func TestCaretBlinksWhileRenaming(t *testing.T) {
+	m := model{
+		mode: repositoriesMode, width: 72, height: 20, path: "/tmp/mds",
+		repositories: []string{"511/lab-one"}, favorites: map[string]bool{},
+		collapsed: map[string]bool{}, groupTitles: map[string]string{},
+	}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(model)
+	if !m.editingTitle {
+		t.Fatal("expected e to open the rename editor")
+	}
+	if !m.blinkActive {
+		t.Fatal("expected opening the rename editor to arm the caret blink")
+	}
+	if cmd == nil {
+		t.Fatal("expected opening the rename editor to return the blink timer")
+	}
+
+	updated, cmd = m.Update(blinkMsg{token: m.blinkToken})
+	m = updated.(model)
+	if m.titleNameInput.input.Cursor.Blink != true {
+		t.Fatal("expected the first tick to flip the cursor into its blank frame")
+	}
+	if cmd == nil {
+		t.Fatal("expected a blink tick to re-arm the timer")
+	}
+
+	updated, _ = m.Update(blinkMsg{token: m.blinkToken})
+	if blink := updated.(model).titleNameInput.input.Cursor.Blink; blink != false {
+		t.Fatal("expected the second tick to flip the cursor back to the block frame")
+	}
+
+	before := m.titleNameInput.input.Cursor.Blink
+	updated, cmd = m.Update(blinkMsg{token: m.blinkToken + 99})
+	if blink := updated.(model).titleNameInput.input.Cursor.Blink; blink != before {
+		t.Fatal("expected a stale blink tick to be ignored")
+	}
+	if cmd != nil {
+		t.Fatal("expected a stale blink tick not to re-arm the timer")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m = updated.(model); m.editingTitle || m.blinkActive {
+		t.Fatal("expected Esc to close the rename editor and stop the blink")
+	}
+}
+
+// TestCaretGlyphsAlternate pins the two frames the caret renders.
+func TestCaretGlyphsAlternate(t *testing.T) {
+	if got := textCaret(true); got != " " {
+		t.Fatalf("blank frame = %q, want a space", got)
+	}
+	if got := textCaret(false); got != "█" {
+		t.Fatalf("block frame = %q, want █", got)
+	}
+}
+
+// TestSettingsValueEditorStaysVisibleOnShortTerminals covers the other editor
+// that shares the reserved rows.
+func TestSettingsValueEditorStaysVisibleOnShortTerminals(t *testing.T) {
+	for _, height := range []int{4, 6, 8, 12, 24} {
+		m := model{
+			mode: settingsMode, width: 72, height: height, path: "/tmp/mds",
+			favorites: map[string]bool{}, collapsed: map[string]bool{},
+			groupTitles:    map[string]string{},
+			editingSetting: "profile-name", settingInput: "Shrey Mudgal",
+		}
+		if view := ansi.Strip(m.View()); !strings.Contains(view, "Shrey Mudgal") {
+			t.Errorf("height %d: settings value missing from view %q", height, view)
+		}
+	}
+}
+
+// TestShortHelpListsRenameShortcut is the regression guard for the missing e
+// shortcut in the footer legend.
+func TestShortHelpListsRenameShortcut(t *testing.T) {
+	found := false
+	for _, binding := range repoKeys.ShortHelp() {
+		if key, _ := binding.Help().Key, binding.Help().Desc; key == repoKeys.Rename.Help().Key {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected the short help legend to list the e rename shortcut")
+	}
+	if got := repoKeys.Rename.Help().Desc; got != "rename" {
+		t.Fatalf("rename help description = %q, want rename", got)
+	}
+	now := time.Now()
+	m := model{mode: repositoriesMode, width: 110, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}, lastRefresh: now, nextRefresh: now.Add(5 * time.Minute)}
+	if view := ansi.Strip(m.repositoriesView()); !strings.Contains(view, "e rename") {
+		t.Fatalf("expected the repository footer to show the rename shortcut, got %q", view)
+	}
+}
+
+// TestTrackedCommitCountsAcceptProfileNameAlone is the regression guard for the
+// vanished commit counter: the loader used to bail out whenever the GitHub
+// username was blank, which threw away the profile display name fallback.
+func TestTrackedCommitCountsAcceptProfileNameAlone(t *testing.T) {
+	workspace := t.TempDir()
+	repository := "DSCI_511_lab1/mds"
+	if err := os.MkdirAll(filepath.Join(workspace, repository), 0o755); err != nil {
+		t.Fatalf("create workspace repository: %v", err)
+	}
+	tracked := map[string]bool{repository: true}
+
+	// A non-repository directory cannot yield a count, but reaching that
+	// failure at all proves the loader looked instead of bailing out on the
+	// blank username. Bailing out leaves errors empty.
+	message := loadTrackedCommitCounts(workspace, []string{repository}, tracked, "", "Shrey Mudgal", "github.ubc.ca")()
+	counts, ok := message.(commitCountsMsg)
+	if !ok {
+		t.Fatalf("message = %T, want commitCountsMsg", message)
+	}
+	if len(counts.errors) != 1 {
+		t.Fatalf("errors = %v, want the tracked repository to be inspected despite a blank username", counts.errors)
+	}
+
+	// Without a profile name there is genuinely nothing to match on.
+	message = loadTrackedCommitCounts(workspace, []string{repository}, tracked, "", "", "github.ubc.ca")()
+	counts, _ = message.(commitCountsMsg)
+	if len(counts.errors) != 0 {
+		t.Fatalf("errors = %v, want no lookup when both identifier fields are blank", counts.errors)
 	}
 }

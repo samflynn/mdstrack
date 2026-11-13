@@ -12,8 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const applicationName = "mds"
@@ -21,6 +27,54 @@ const defaultGitHubHost = "github.ubc.ca"
 const commitGoal = 3
 const commitProgressWidth = 12
 const defaultRefreshIntervalMinutes = 5
+
+// Layout metrics. The interface is drawn borderless: a three column gutter, a
+// one line header, one accent rule, the body, and a one line footer. Every size
+// is derived from these plus the measured frame size of the styles involved.
+const (
+	layoutGutter   = 3
+	layoutAccent   = 1
+	layoutFooter   = 1
+	layoutMinWidth = 24
+	layoutMinBody  = 1
+	blankLine      = " "
+
+	// repositoryMinScrollRoom is how many body rows must remain scrollable for
+	// the tracked block to be pinned at all. One row is the scrolled-to row and
+	// one is the overflow indicator that reports it, so pinning fewer rows than
+	// the body needs would leave a row with no window to render into.
+	repositoryMinScrollRoom = 2
+)
+
+// chromeStyle frames the whole interface. It carries the gutter and nothing
+// else, so layoutMetrics can measure padding rather than guessing at offsets.
+var chromeStyle = lipgloss.NewStyle().Padding(0, 0, 0, layoutGutter)
+
+const statusLifetime = 4 * time.Second
+
+// blinkInterval is the caret blink half-period. Bubbles' own cursor default is
+// 530ms; the value is restated here because this app drives the timer itself
+// (Bubbles' start-of-cycle message is unexported and cannot be intercepted).
+const blinkInterval = 530 * time.Millisecond
+
+// minLegendWidth is the narrowest footer that still shows a useful legend
+// alongside the refresh clock. Below it the clock is dropped instead of
+// squeezing the bindings down to an ellipsis.
+const minLegendWidth = 20
+
+// Palette. Every colour is adaptive so the interface keeps a usable contrast
+// ratio on both light and dark terminals, and so NO_COLOR=1 degrades to plain
+// text rather than losing information (state is also carried by glyphs).
+var (
+	colorAccent  = lipgloss.AdaptiveColor{Light: "#5B5BD6", Dark: "#A78BFA"}
+	colorBrand   = lipgloss.AdaptiveColor{Light: "#3D3DC7", Dark: "#C4B5FD"}
+	colorMuted   = lipgloss.AdaptiveColor{Light: "#5C5C66", Dark: "#9CA0AA"}
+	colorSubtle  = lipgloss.AdaptiveColor{Light: "#8A8A94", Dark: "#6B7280"}
+	colorDanger  = lipgloss.AdaptiveColor{Light: "#B3271E", Dark: "#F87171"}
+	colorSuccess = lipgloss.AdaptiveColor{Light: "#0F766E", Dark: "#5EEAD4"}
+	colorPending = lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FBBF24"}
+	colorTracked = lipgloss.AdaptiveColor{Light: "#7C3AED", Dark: "#C4B5FD"}
+)
 
 type config struct {
 	MDSFolder              string            `json:"mds_folder"`
@@ -50,9 +104,23 @@ type commitCountsMsg struct {
 	repositories []string
 }
 
-type commitSpinnerTickMsg struct{}
+type refreshTickMsg struct {
+	at time.Time
+}
 
-type refreshTickMsg struct{}
+// blinkMsg advances the caret blink of the field currently being typed into.
+// The token identifies the timer generation so a tick left over from a closed
+// editor can never disturb the cycle that replaced it.
+type blinkMsg struct {
+	token int
+}
+
+// statusExpiryMsg fires once per transient status message so stale notifications
+// clear themselves instead of lingering for the life of the session.
+type statusExpiryMsg struct {
+	at    time.Time
+	token int
+}
 
 type workspaceRefreshMsg struct {
 	repositories []string
@@ -92,6 +160,52 @@ type repositoryListRow struct {
 	header     bool
 }
 
+// keyMap describes the repository list bindings once, so the persistent footer
+// and the ? overlay cannot drift apart.
+type keyMap struct {
+	Move     key.Binding
+	Track    key.Binding
+	Search   key.Binding
+	Open     key.Binding
+	GitHub   key.Binding
+	Rename   key.Binding
+	Settings key.Binding
+	Help     key.Binding
+	Quit     key.Binding
+}
+
+// repoKeys is the single source of truth for the list bindings, so the
+// persistent footer and the ? overlay cannot drift apart. It is a package-level
+// value because it holds no per-model state.
+var repoKeys = keyMap{
+	Move:     key.NewBinding(key.WithKeys("up", "down", "j", "k"), key.WithHelp("↑/↓", "move")),
+	Track:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("Enter", "track")),
+	Search:   key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
+	Open:     key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open")),
+	GitHub:   key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "GitHub")),
+	Rename:   key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "rename")),
+	Settings: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "settings")),
+	Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	Quit:     key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+}
+
+// ShortHelp drives the persistent footer. It is deliberately the essentials:
+// the footer has one row shared with the refresh clock, so the always-visible
+// legend stays short and ends with ? help for everything else.
+func (k keyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Move, k.Track, k.Search, k.Rename, k.Open, k.GitHub, k.Help}
+}
+
+// FullHelp drives the ? overlay, grouped by intent.
+func (k keyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Move, k.Track},
+		{k.Search, k.Rename},
+		{k.Open, k.GitHub},
+		{k.Settings, k.Help, k.Quit},
+	}
+}
+
 type model struct {
 	mode                   mode
 	path                   string
@@ -111,7 +225,6 @@ type model struct {
 	commitCounts           map[string]int
 	commitErrors           map[string]error
 	loadingCommits         bool
-	spinnerFrame           int
 	collapsed              map[string]bool
 	favoritesTitle         string
 	groupTitles            map[string]string
@@ -137,23 +250,186 @@ type model struct {
 	enteringCloneFolder    bool
 	cloneStatus            string
 	cursor                 int
-	err                    error
-	width                  int
-	height                 int
+	// scrollTop is the first scrollable row shown under the pinned tracking
+	// section. It is owned by Update (see synchronizeScroll) rather than derived
+	// inside View, because a sticky window is stateful: it must only advance
+	// when the cursor crosses an edge, not track the cursor every frame.
+	scrollTop int
+	err       error
+	width     int
+	height    int
+	// now is the single clock reading the view layer is allowed to use, so
+	// View() stays deterministic and the renderer never sees a diffing artefact.
+	now time.Time
+	// statusToken identifies the most recent transient status message. Expiry
+	// messages carrying a stale token are ignored.
+	statusToken int
+	// blinkToken identifies the caret blink timer generation. Advancing it
+	// invalidates any tick still in flight from a previous editing session.
+	blinkToken int
+	// blinkActive reports whether the caret blink cycle is currently running.
+	blinkActive bool
+	spinner     spinner.Model
+	help        help.Model
+
+	// Search, clone-folder, and title text entry share one implementation
+	// (textValue) so editing, unicode handling, and horizontal scrolling all
+	// behave identically and stay testable.
+	localSearchInput  textValue
+	githubSearchInput textValue
+	folderNameInput   textValue
+	titleNameInput    textValue
+	settingValueInput textValue
+	setupPathInput    textValue
+	setupUserInput    textValue
+	setupNameInput    textValue
+	setupHostInput    textValue
 }
 
 var (
-	titleStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
-	mutedStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	errorStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	borderStyle         = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
-	promptStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-	selectedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
-	groupStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Italic(true)
-	favoriteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true).Bold(true)
-	cursorStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
-	commitSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(colorBrand)
+	accentStyle   = lipgloss.NewStyle().Foreground(colorAccent)
+	mutedStyle    = lipgloss.NewStyle().Foreground(colorMuted)
+	subtleStyle   = lipgloss.NewStyle().Foreground(colorSubtle)
+	errorStyle    = lipgloss.NewStyle().Foreground(colorDanger)
+	promptStyle   = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	selectedStyle = lipgloss.NewStyle().Foreground(colorAccent)
+	groupStyle    = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
+	favoriteStyle = lipgloss.NewStyle().Foreground(colorTracked).Italic(true).Bold(true)
+	cursorStyle   = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
 )
+
+// commitBarStyle renders the fixed-width commit bar. Bubbles' progress component
+// owns the filled/empty glyphs so the track cannot drift out of the layout. Fill
+// and empty colours are left at the component defaults and the surrounding style
+// supplies the state colour, which keeps the bar legible under NO_COLOR.
+var commitBarStyle = progress.New(
+	progress.WithWidth(commitProgressWidth),
+	progress.WithFillCharacters('█', '░'),
+	progress.WithoutPercentage(),
+)
+
+func newModelSpinner() spinner.Model {
+	s := spinner.New(spinner.WithSpinner(spinner.Line), spinner.WithStyle(accentStyle))
+	s.Spinner.FPS = 100 * time.Millisecond
+	return s
+}
+
+func newModelHelp() help.Model {
+	h := help.New()
+	h.Styles.ShortKey = accentStyle
+	h.Styles.ShortDesc = mutedStyle
+	h.Styles.ShortSeparator = subtleStyle
+	h.Styles.FullKey = accentStyle
+	h.Styles.FullDesc = mutedStyle
+	h.Styles.FullSeparator = subtleStyle
+	h.Styles.Ellipsis = subtleStyle
+	return h
+}
+
+// helpModel returns the help renderer sized to the current content width.
+// Models built directly by tests have a zero-value help field, which would
+// render every binding jammed together, so fall back to the house styling.
+// Deriving the width here keeps it correct on resize without a separate
+// WindowSizeMsg bookkeeping step.
+func (m model) helpModel(width int) help.Model {
+	h := m.help
+	if h.ShortSeparator == "" {
+		h = newModelHelp()
+	}
+	h.Width = max(1, width)
+	return h
+}
+
+// textValue is a single-line text field. The owning prompt holds the text and
+// passes it in on every interaction, so a field written directly (by a test, a
+// config load, or a reset) is adopted automatically instead of drifting out of
+// step with its textinput.
+//
+// The cursor is drawn by render rather than textinput.View so the composed line
+// carries no trailing padding from textinput, which would otherwise break the
+// exact-width layout contract.
+//
+// Arrow keys are never forwarded here: textinput binds left/right to its own
+// cursor and up/down to suggestions, but in this interface those keys must keep
+// driving list navigation. Callers only pass editing keys.
+type textValue struct {
+	prompt string
+	input  textinput.Model
+}
+
+func newTextValue(prompt string) textValue {
+	return textValue{prompt: prompt}.ready()
+}
+
+// ready focuses the field and clears any styling the zero value carries.
+// A model built as a literal (rather than through newModel) has an unfocused
+// textinput, and an unfocused textinput ignores every key, so update and bind
+// route through here to stay usable either way.
+func (t textValue) ready() textValue {
+	if !t.input.Focused() {
+		// Rebuilt rather than focused in place: the zero value has a nil blink
+		// context, and focusing it would dereference that. The owning field is
+		// the source of truth, so bind restores the text immediately after.
+		t.input = textinput.New()
+		t.input.Prompt = ""
+		t.input.TextStyle = lipgloss.NewStyle()
+		t.input.Cursor.Style = promptStyle
+		t.input.Focus()
+	}
+	return t
+}
+
+// bind syncs the textinput with the owning field's current text and leaves the
+// caret at the end, where these prompts expect it.
+func (t *textValue) bind(value string) {
+	if t.input.Value() != value {
+		t.input.SetValue(value)
+	}
+	t.input.CursorEnd()
+}
+
+// update applies one editing key and returns the resulting text.
+func (t *textValue) update(msg tea.KeyMsg, value string) (string, tea.Cmd) {
+	*t = t.ready()
+	t.bind(value)
+	updated, cmd := t.input.Update(msg)
+	t.input = updated
+	return t.input.Value(), cmd
+}
+
+// render draws prompt plus text plus a cursor block, trimmed to width cells and
+// showing the tail of the text when it does not fit.
+//
+// The caret glyph is read from the textinput's own blink state rather than being
+// hardcoded, so the caret actually blinks. textinput inverts this state (its
+// cursor renders the plain text style while Blink is true and the reversed block
+// while it is false), and View must stay pure, so the toggle is driven by a
+// blink timer in Update and merely read here.
+func (t textValue) render(width int, value string) string {
+	t = t.ready()
+	t.bind(value)
+	inner := max(1, width-lipgloss.Width(t.prompt))
+	caret := textCaret(t.input.Cursor.Blink)
+	// The caret occupies the last cell of the prompt's width. Text keeps the
+	// cell before it so the caret never sits on top of the tail. Inputs show
+	// their tail because the caret is at the end.
+	text := max(1, inner-1)
+	tail := truncateLeft(t.input.Value(), text)
+	pad := strings.Repeat(" ", max(0, text-lipgloss.Width(tail)))
+	return promptStyle.Render(t.prompt + tail + pad + caret)
+}
+
+// textCaret is the one-cell caret glyph for a blink state. true is the "off"
+// half of the cycle (the field shows its plain text), false is the visible
+// block; matching textinput's own inverted convention keeps a real blinking
+// cursor consistent with the component's.
+func textCaret(blink bool) string {
+	if blink {
+		return " "
+	}
+	return "█"
+}
 
 func main() {
 	initial, err := newModel()
@@ -180,14 +456,27 @@ func newModel() (model, error) {
 	repositories, err := findRepositories(stored.MDSFolder)
 	now := time.Now()
 	refreshInterval := configuredRefreshInterval(stored.RefreshIntervalMinutes)
-	return model{mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), deadlineOverride: stored.DeadlineOverride, refreshIntervalMinutes: refreshInterval, lastRefresh: now, nextRefresh: now.Add(time.Duration(refreshInterval) * time.Minute), repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, groupTitles: stored.GroupTitles, err: err}, nil
+	m := model{
+		mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), deadlineOverride: stored.DeadlineOverride, refreshIntervalMinutes: refreshInterval, lastRefresh: now, nextRefresh: now.Add(time.Duration(refreshInterval) * time.Minute), now: now, repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, groupTitles: stored.GroupTitles, err: err,
+	}
+	m.spinner, m.help = newModelSpinner(), newModelHelp()
+	m.localSearchInput = newTextValue("/ ")
+	m.githubSearchInput = newTextValue("/ ")
+	m.folderNameInput = newTextValue("  ")
+	m.titleNameInput = newTextValue("> ")
+	m.settingValueInput = newTextValue("> ")
+	m.setupPathInput = newTextValue("> ")
+	m.setupUserInput = newTextValue("> ")
+	m.setupNameInput = newTextValue("> ")
+	m.setupHostInput = newTextValue("> ")
+	return m, nil
 }
 
 func (m model) Init() tea.Cmd {
 	if m.mode != repositoriesMode {
 		return nil
 	}
-	return tea.Batch(loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), nextCommitSpinnerTick(), nextRefreshTick())
+	return tea.Batch(loadTrackedCommitCounts(m.path, m.repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), m.spinner.Tick, nextRefreshTick())
 }
 
 func (m *model) startCommitCountLoad(repositories []string) tea.Cmd {
@@ -195,7 +484,7 @@ func (m *model) startCommitCountLoad(repositories []string) tea.Cmd {
 	if !m.loadingCommits {
 		return nil
 	}
-	return tea.Batch(loadTrackedCommitCounts(m.path, repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), nextCommitSpinnerTick())
+	return tea.Batch(loadTrackedCommitCounts(m.path, repositories, m.favorites, m.githubUsername, m.githubProfileName, m.githubHost), m.spinner.Tick)
 }
 
 func hasTrackedRepositories(favorites map[string]bool) bool {
@@ -209,8 +498,68 @@ func hasTrackedRepositories(favorites map[string]bool) bool {
 
 func nextRefreshTick() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg {
-		return refreshTickMsg{}
+		return refreshTickMsg{at: time.Now()}
 	})
+}
+
+// nextStatusExpiry schedules the clear of a transient status message. The token
+// ties the timer to one specific message so a newer status is never wiped early.
+func nextStatusExpiry(token int) tea.Cmd {
+	return tea.Tick(statusLifetime, func(time.Time) tea.Msg {
+		return statusExpiryMsg{at: time.Now(), token: token}
+	})
+}
+
+// nextBlink schedules the next caret toggle for the given timer generation.
+func nextBlink(token int) tea.Cmd {
+	return tea.Tick(blinkInterval, func(time.Time) tea.Msg {
+		return blinkMsg{token: token}
+	})
+}
+
+// synchronizeBlink starts and stops the caret blink cycle to match whether a
+// text editor is active. Driving it from one place keeps every editor - the
+// rename prompt, the settings value, the search filters - blinking, instead of
+// relying on each key handler to remember to arm a timer and to stop it again.
+func (m *model) synchronizeBlink(cmd tea.Cmd) tea.Cmd {
+	active := m.editingField() != nil
+	switch {
+	case active && !m.blinkActive:
+		m.blinkActive = true
+		m.blinkToken++
+		return tea.Batch(cmd, nextBlink(m.blinkToken))
+	case !active && m.blinkActive:
+		// Bumping the token retires any tick already in flight, so a closed
+		// editor cannot keep toggling a field nobody is looking at.
+		m.blinkActive = false
+		m.blinkToken++
+	}
+	return cmd
+}
+
+// editingField is the text field the user is currently typing into, or nil when
+// no field is active. Pointer receivers matter: the blink timer has to write the
+// toggled cursor back onto the field that owns it.
+func (m *model) editingField() *textValue {
+	switch m.mode {
+	case settingsMode:
+		if m.editingSetting != "" {
+			return &m.settingValueInput
+		}
+	case repositoriesMode:
+		if m.editingTitle {
+			return &m.titleNameInput
+		}
+		if m.localSearchActive {
+			return &m.localSearchInput
+		}
+	case searchMode:
+		if m.enteringCloneFolder {
+			return &m.folderNameInput
+		}
+		return &m.githubSearchInput
+	}
+	return nil
 }
 
 func (m model) refreshWorkspace() tea.Cmd {
@@ -220,16 +569,61 @@ func (m model) refreshWorkspace() tea.Cmd {
 	}
 }
 
-func nextCommitSpinnerTick() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-		return commitSpinnerTickMsg{}
-	})
+// Update wraps update() to own the lifecycle of transient status messages in a
+// single place. Whenever a status appears or is replaced it arms one expiry
+// timer; the token makes a stale timer a no-op, so a newer status is never
+// cleared early.
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updated, cmd := m.update(msg)
+	next, ok := updated.(model)
+	if !ok {
+		return updated, cmd
+	}
+	if _, resized := msg.(tea.WindowSizeMsg); resized {
+		// A resize changes how many rows fit, so the pinned block and the
+		// window underneath it both have to be measured again.
+		cmd = next.synchronizeBlink(cmd)
+		return next.synchronizeScroll(), cmd
+	}
+	newStatus := (next.actionStatus != "" && next.actionStatus != m.actionStatus) ||
+		(next.cloneStatus != "" && next.cloneStatus != m.cloneStatus)
+	if !newStatus {
+		cmd = next.synchronizeBlink(cmd)
+		return next.synchronizeScroll(), cmd
+	}
+	next.statusToken++
+	cmd = next.synchronizeBlink(tea.Batch(cmd, nextStatusExpiry(next.statusToken)))
+	return next.synchronizeScroll(), cmd
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		if m.loadingCommits {
+			return m, cmd
+		}
+		return m, nil
+	case statusExpiryMsg:
+		// Only the newest status owns the timer; older ones are discarded.
+		if msg.token != m.statusToken {
+			return m, nil
+		}
+		m.actionStatus, m.cloneStatus = "", ""
+		return m, nil
+	case blinkMsg:
+		// Only the newest blink cycle may toggle the caret; ticks left over
+		// from a closed editor are stale and get dropped.
+		if msg.token != m.blinkToken {
+			return m, nil
+		}
+		if field := m.editingField(); field != nil {
+			field.input.Cursor.Blink = !field.input.Cursor.Blink
+		}
+		return m, nextBlink(m.blinkToken)
 	case commitCountsMsg:
 		for _, repository := range msg.repositories {
 			delete(m.commitCounts, repository)
@@ -242,13 +636,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.commitErrors[repository] = err
 		}
 		m.loadingCommits = false
-	case commitSpinnerTickMsg:
-		if m.loadingCommits {
-			m.spinnerFrame = (m.spinnerFrame + 1) % len(commitSpinnerFrames)
-			return m, nextCommitSpinnerTick()
-		}
 	case refreshTickMsg:
-		if m.mode == repositoriesMode && !m.nextRefresh.After(time.Now()) {
+		m.now = msg.at
+		if m.mode == repositoriesMode && !m.nextRefresh.After(msg.at) {
 			return m, m.refreshWorkspace()
 		}
 		return m, nextRefreshTick()
@@ -312,13 +702,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.localSearch, m.localSearchActive, m.cursor = "", false, 0
 					return m, nil
 				case "backspace", "ctrl+h":
-					m.localSearch, m.cursor = removeLastRune(m.localSearch), 0
-					return m, nil
-				default:
-					if isTextInputKey(msg) {
-						m.localSearch, m.cursor = m.localSearch+string(msg.Runes), 0
-						return m, nil
-					}
+					next, cmd := m.localSearchInput.update(msg, m.localSearch)
+					m.localSearch, m.cursor = next, 0
+					return m, cmd
+				}
+				// Arrow keys fall through so they keep moving the list cursor.
+				if isTextEditingKey(msg) {
+					next, cmd := m.localSearchInput.update(msg, m.localSearch)
+					m.localSearch, m.cursor = next, 0
+					return m, cmd
 				}
 			}
 			if m.editingTitle {
@@ -344,12 +736,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.editingGroup = ""
 					m.editingTitle = false
 				case "backspace", "ctrl+h":
-					if len(m.titleInput) > 0 {
-						m.titleInput = m.titleInput[:len(m.titleInput)-1]
-					}
+					next, cmd := m.titleNameInput.update(msg, m.titleInput)
+					m.titleInput = next
+					return m, cmd
 				default:
-					if isTextInputKey(msg) {
-						m.titleInput += string(msg.Runes)
+					if isTextEditingKey(msg) {
+						next, cmd := m.titleNameInput.update(msg, m.titleInput)
+						m.titleInput = next
+						return m, cmd
 					}
 				}
 				return m, nil
@@ -400,33 +794,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			return m.advanceSetup()
 		case "backspace", "ctrl+h":
-			if m.setupStep == 0 && len(m.path) > 0 {
-				m.path = m.path[:len(m.path)-1]
-			}
-			switch m.setupStep {
-			case 1:
-				m.githubUsername = removeLastRune(m.githubUsername)
-			case 2:
-				m.githubProfileName = removeLastRune(m.githubProfileName)
-			case 3:
-				m.githubHost = removeLastRune(m.githubHost)
-			}
+			next, cmd := m.setupFieldMsg(msg)
+			return next, cmd
 		default:
-			if isTextInputKey(msg) {
-				switch m.setupStep {
-				case 0:
-					m.path += string(msg.Runes)
-				case 1:
-					m.githubUsername += string(msg.Runes)
-				case 2:
-					m.githubProfileName += string(msg.Runes)
-				case 3:
-					m.githubHost += string(msg.Runes)
-				}
+			if isTextEditingKey(msg) {
+				next, cmd := m.setupFieldMsg(msg)
+				return next, cmd
 			}
 		}
 	}
 	return m, nil
+}
+
+// setupFieldMsg routes an editing key into whichever setup step is active.
+// Steps are numbered from 0 and each owns one text field, so the selection
+// lives here rather than being repeated in the key handler and the view.
+func (m model) setupFieldMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.setupInput(msg, m.setupValue())
+	return m, nil
+}
+
+func (m model) setupValue() string {
+	switch m.setupStep {
+	case 0:
+		return m.path
+	case 1:
+		return m.githubUsername
+	case 2:
+		return m.githubProfileName
+	default:
+		return m.githubHost
+	}
+}
+
+func (m *model) setupInput(msg tea.KeyMsg, value string) {
+	var next string
+	switch m.setupStep {
+	case 0:
+		next, _ = m.setupPathInput.update(msg, value)
+		m.path = next
+	case 1:
+		next, _ = m.setupUserInput.update(msg, value)
+		m.githubUsername = next
+	case 2:
+		next, _ = m.setupNameInput.update(msg, value)
+		m.githubProfileName = next
+	default:
+		next, _ = m.setupHostInput.update(msg, value)
+		m.githubHost = next
+	}
 }
 
 func (m model) advanceSetup() (tea.Model, tea.Cmd) {
@@ -505,21 +921,49 @@ func (m model) View() string {
 }
 
 func (m model) setupView() string {
-	width := m.contentWidth()
-	label, value := "Location of UBC MDS folder:", m.path
-	if m.setupStep == 1 {
-		label, value = "GitHub username:", m.githubUsername
-	} else if m.setupStep == 2 {
-		label, value = "GitHub profile display name:", m.githubProfileName
-	} else if m.setupStep == 3 {
-		label, value = "GitHub host:", m.githubHost
+	header := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("UBC MDS repository tracker")}
+	body := []string{
+		mutedStyle.Render("First-time setup"),
+		blankLine,
+		labelForSetupStep(m.setupStep),
+		m.setupInputView(),
 	}
-	lines := []string{titleStyle.Render("mds"), mutedStyle.Render("UBC MDS repository tracker"), "", "First-time setup", "", label, promptStyle.Render("> " + truncateLeft(value, max(1, width-3)) + "█")}
 	if m.err != nil {
-		lines = append(lines, "", errorStyle.Render(truncate("Error: "+m.err.Error(), width)))
+		body = append(body, blankLine, errorStyle.Render("Error: "+m.err.Error()))
 	}
-	lines = append(lines, "", mutedStyle.Render(truncate("Enter to continue · q or Ctrl+C to quit", width)))
-	return m.fullScreen(lines)
+	footer := []string{mutedStyle.Render("Enter continue · q quit")}
+	return m.fullScreen(header, body, footer)
+}
+
+func (m model) setupInputView() string {
+	return m.setupField().render(m.contentWidth(), m.setupValue())
+}
+
+// setupField is the text field owned by the active setup step.
+func (m model) setupField() textValue {
+	switch m.setupStep {
+	case 1:
+		return m.setupUserInput
+	case 2:
+		return m.setupNameInput
+	case 3:
+		return m.setupHostInput
+	default:
+		return m.setupPathInput
+	}
+}
+
+func labelForSetupStep(step int) string {
+	switch step {
+	case 1:
+		return "GitHub username:"
+	case 2:
+		return "GitHub profile display name:"
+	case 3:
+		return "GitHub host:"
+	default:
+		return "Location of UBC MDS folder:"
+	}
 }
 
 func (m model) effectiveDeadline(now time.Time) time.Time {
@@ -539,27 +983,29 @@ func nextSaturday(day time.Time) time.Time {
 
 func (m model) settingsView() string {
 	width := m.contentWidth()
-	values := settingsValues(m)
-	lines := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("Settings"), ""}
-	for index, setting := range values {
+	header := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("Settings")}
+	body := []string{}
+	settings := settingsValues(m)
+	// Window the list so the selected row stays on screen on a short terminal.
+	// The window gives up exactly the rows the value editor reserves, which is
+	// what keeps the prompt below from being clipped away.
+	room := m.listCapacity()
+	start := max(0, min(m.settingsCursor, max(0, len(settings)-room)))
+	end := min(len(settings), start+room)
+	for index, setting := range settings[start:end] {
 		prefix := "  "
-		if index == m.settingsCursor {
-			prefix = "▸ "
-		}
 		style := mutedStyle
-		if index == m.settingsCursor {
-			style = cursorStyle
+		if start+index == m.settingsCursor {
+			prefix, style = "▸ ", cursorStyle
 		}
-		lines = append(lines, style.Render(prefix+truncate(setting.label+": "+setting.value, width)))
+		body = append(body, style.Render(truncate(prefix+setting.label+": "+setting.value, width)))
 	}
-	if m.editingSetting != "" {
-		lines = append(lines, "", promptStyle.Render("New value: "+truncateLeft(m.settingInput, max(1, width-12))+"█"), mutedStyle.Render("Enter save · Esc cancel"))
-	}
+	body = append(body, m.editorOverlayRowsView(width)...)
 	if m.err != nil {
-		lines = append(lines, "", errorStyle.Render(truncate("Error: "+m.err.Error(), width)))
+		body = append(body, blankLine, errorStyle.Render(truncate("Error: "+m.err.Error(), width)))
 	}
-	lines = append(lines, "", mutedStyle.Render("↑/↓ select · Enter edit · Esc back · q quit"))
-	return m.fullScreen(lines)
+	footer := []string{mutedStyle.Render("↑/↓ select · Enter edit · Esc back · q quit")}
+	return m.fullScreen(header, body, footer)
 }
 
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -576,11 +1022,11 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cloneGitHubRepository(m.path, m.githubHost, repository, folder)
 		case "esc":
 			m.cloneFolderInput, m.enteringCloneFolder = "", false
-		case "backspace", "ctrl+h":
-			m.cloneFolderInput = removeLastRune(m.cloneFolderInput)
 		default:
-			if isTextInputKey(msg) {
-				m.cloneFolderInput += string(msg.Runes)
+			if isTextEditingKey(msg) {
+				next, cmd := m.folderNameInput.update(msg, m.cloneFolderInput)
+				m.cloneFolderInput = next
+				return m, cmd
 			}
 		}
 		return m, nil
@@ -620,12 +1066,14 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cloneConfirmation, m.cloneStatus = results[m.searchCursor].FullName, ""
 		}
 	case "backspace", "ctrl+h":
-		m.githubSearch = removeLastRune(m.githubSearch)
-		m.searchCursor = 0
+		next, cmd := m.githubSearchInput.update(msg, m.githubSearch)
+		m.githubSearch, m.searchCursor = next, 0
+		return m, cmd
 	default:
-		if isTextInputKey(msg) {
-			m.githubSearch += string(msg.Runes)
-			m.searchCursor = 0
+		if isTextEditingKey(msg) {
+			next, cmd := m.githubSearchInput.update(msg, m.githubSearch)
+			m.githubSearch, m.searchCursor = next, 0
+			return m, cmd
 		}
 	}
 	return m, nil
@@ -633,14 +1081,16 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) searchView() string {
 	width := m.contentWidth()
-	lines := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("GitHub repository search"), mutedStyle.Render("Accessible repositories on " + m.githubHost), "", promptStyle.Render("/ " + truncateLeft(m.githubSearch, max(1, width-3)) + "█")}
+	header := m.searchHeader()
+	body := []string{m.githubSearchInput.render(width, m.githubSearch)}
 	if m.searchLoading {
-		lines = append(lines, "", mutedStyle.Render("Loading accessible repositories..."))
+		body = append(body, blankLine, mutedStyle.Render("Loading accessible repositories..."))
 	} else if m.searchError != nil {
-		lines = append(lines, "", errorStyle.Render(truncate("Unable to load repositories: "+m.searchError.Error(), width)))
+		body = append(body, blankLine, errorStyle.Render(truncate("Unable to load repositories: "+m.searchError.Error(), width)))
 	} else {
 		results := m.filteredSearchResults()
-		visible := max(1, m.contentHeight()-8)
+		// The rows share the body with the filter line, so drop one for it.
+		visible := max(1, m.visibleRows()-1)
 		start := max(0, min(m.searchCursor, max(0, len(results)-visible)))
 		end := min(len(results), start+visible)
 		for index, repository := range results[start:end] {
@@ -649,12 +1099,16 @@ func (m model) searchView() string {
 			if start+index == m.searchCursor {
 				prefix, style = "▸ ", cursorStyle
 			}
-			lines = append(lines, style.Render(prefix+truncate(repository.FullName, width-2)))
+			body = append(body, style.Render(prefix+truncate(repository.FullName, width-2)))
 		}
 		if len(results) == 0 {
-			lines = append(lines, "", mutedStyle.Render("No accessible repositories match your search."))
+			body = append(body, blankLine, mutedStyle.Render("No accessible repositories match your search."))
 		}
 	}
+	return m.fullScreen(header, body, []string{mutedStyle.Render(m.searchFooter())})
+}
+
+func (m model) searchFooter() string {
 	hideClonedLabel := "h hide cloned"
 	if m.hideCloned {
 		hideClonedLabel = "h show cloned"
@@ -672,8 +1126,7 @@ func (m model) searchView() string {
 	} else if m.cloneStatus != "" {
 		footer = m.cloneStatus
 	}
-	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
-	return m.fullScreen(lines)
+	return footer
 }
 
 func (m model) filteredSearchResults() []githubSearchRepository {
@@ -726,12 +1179,14 @@ func (m model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.editingSetting, m.settingInput = "", ""
 		case "backspace", "ctrl+h":
-			if len(m.settingInput) > 0 {
-				m.settingInput = m.settingInput[:len(m.settingInput)-1]
-			}
+			next, cmd := m.settingValueInput.update(msg, m.settingInput)
+			m.settingInput = next
+			return m, cmd
 		default:
-			if isTextInputKey(msg) {
-				m.settingInput += string(msg.Runes)
+			if isTextEditingKey(msg) {
+				next, cmd := m.settingValueInput.update(msg, m.settingInput)
+				m.settingInput = next
+				return m, cmd
 			}
 		}
 		return m, nil
@@ -928,139 +1383,263 @@ func runRepositoryAction(command string, argument string) tea.Cmd {
 }
 
 func (m model) helpView() string {
-	width := m.contentWidth()
-	lines := []string{
-		titleStyle.Render("mds") + "  " + mutedStyle.Render("Keyboard shortcuts"),
-		"",
-		promptStyle.Render("Navigation") + "  ↑/↓ or j/k move · Enter track",
-		promptStyle.Render("Open") + "        o menu · v VS Code · p Positron · f Finder",
-		promptStyle.Render("GitHub") + "      g URL actions · o open · c copy",
-		promptStyle.Render("Search") + "      / chooser · l local · g GitHub",
-		promptStyle.Render("Settings") + "    s settings · e rename selected header",
-		"",
-		mutedStyle.Render("? or Esc close · q quit"),
+	header := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("Keyboard shortcuts")}
+	body := []string{m.helpModel(m.contentWidth()).FullHelpView(repoKeys.FullHelp())}
+	footer := []string{mutedStyle.Render("? or Esc close · q quit")}
+	return m.fullScreen(header, body, footer)
+}
+
+// repositoriesHeader is the two line list header. headerHeight() derives its
+// height from this, so the body can be sized before the header is rendered.
+func (m model) repositoriesHeader() []string {
+	return m.repositoriesHeaderLines(m.contentWidth())
+}
+
+// repositoriesHeaderLines takes its width so headerHeight can measure the row
+// count without recursing back through layoutMetrics.
+func (m model) repositoriesHeaderLines(width int) []string {
+	return []string{
+		titleStyle.Render("mds") + "  " + mutedStyle.Render("UBC MDS repositories"),
+		mutedStyle.Render(truncate(m.path, width)),
 	}
-	for index, line := range lines {
-		lines[index] = truncate(line, width)
+}
+
+// searchHeader is the two line search header.
+func (m model) searchHeader() []string {
+	return []string{
+		titleStyle.Render("mds") + "  " + mutedStyle.Render("GitHub repository search"),
+		mutedStyle.Render("Accessible repositories on " + m.githubHost),
 	}
-	return m.fullScreen(lines)
+}
+
+// titleField labels the rename prompt according to what is being renamed.
+func (m model) titleField() textValue {
+	if m.editingGroup == "favorites" {
+		return m.titleNameInput
+	}
+	field := m.titleNameInput
+	field.prompt = "Rename group: "
+	return field
 }
 
 func (m model) repositoriesView() string {
 	width := m.contentWidth()
-	lines := []string{
-		titleStyle.Render("mds") + "  " + mutedStyle.Render("UBC MDS repositories"),
-		mutedStyle.Render(truncate(m.path, width)),
-		"",
-	}
+	header := m.repositoriesHeader()
+	body := []string{}
 	if m.err != nil {
-		lines = append(lines, errorStyle.Render(truncate("Unable to scan repositories: "+m.err.Error(), width)))
+		body = append(body, errorStyle.Render(truncate("Unable to scan repositories: "+m.err.Error(), width)))
 	} else if len(m.repositories) == 0 {
-		lines = append(lines, mutedStyle.Render("No Git repositories found in this folder."))
-	} else {
-		rows := m.repositoryListRows()
-		start, end := m.repositoryWindow(rows)
-		for index, row := range rows[start:end] {
-			selected := start+index == m.cursor
-			if row.key == "divider" {
-				lines = append(lines, mutedStyle.Render(strings.Repeat("─", width)))
-				continue
-			}
-			indent := ""
-			if strings.HasPrefix(row.key, "favorite:") {
-				indent = "  "
-			}
-			if row.header {
-				prefix := "⌄ "
-				if m.collapsed[row.key] {
-					prefix = "› "
-				}
-				label := indent + prefix + truncate(strings.ToUpper(row.group), width-len(indent)-3)
-				if selected {
-					lines = append(lines, cursorStyle.Render("▸ "+label))
-				} else if row.key == "favorites" {
-					lines = append(lines, favoriteStyle.Render("★ "+label))
-				} else {
-					lines = append(lines, groupStyle.Render(label))
-				}
-				continue
-			}
-			marker := "[ ]"
-			if m.favorites[m.repositories[row.index]] {
-				marker = "[X]"
-			}
-			countText := ""
-			deadlineText := ""
-			nameStyle := lipgloss.NewStyle()
-			if m.favorites[m.repositories[row.index]] {
-				deadlineText = deadlineStatus(m.effectiveDeadline(time.Now()), time.Now())
-				if count, ok := m.commitCounts[m.repositories[row.index]]; ok {
-					countText = commitProgress(count)
-					nameStyle = commitProgressStyle(count)
-				} else if m.commitErrors[m.repositories[row.index]] != nil {
-					countText = "GH ERROR"
-					nameStyle = errorStyle
-				} else if m.loadingCommits {
-					countText = commitSpinnerFrames[m.spinnerFrame] + " Loading"
-				}
-			}
-			prefix := indent + marker + " "
-			if selected {
-				prefix = "▸ " + prefix
-			}
-			rightText := deadlineText
-			if countText != "" {
-				if rightText != "" {
-					rightText += "  "
-				}
-				rightText += countText
-			}
-			available := width - lipgloss.Width(prefix) - lipgloss.Width(rightText)
-			name := truncate(row.repository, max(1, available-1))
-			prefixText := selectedStyle.Render(prefix)
-			if selected {
-				prefixText = cursorStyle.Render(prefix)
-			}
-			rowText := prefixText + nameStyle.Render(name)
-			if rightText != "" {
-				rowText += strings.Repeat(" ", max(1, width-lipgloss.Width(rowText)-lipgloss.Width(rightText))) + rightText
-			}
-			lines = append(lines, rowText)
-		}
-		if start > 0 || end < len(rows) {
-			lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", start+1, end, len(rows))))
-		}
+		body = append(body, mutedStyle.Render("No Git repositories found in this folder."))
+	} else if rows := m.repositoryRowsView(width); len(rows) > 0 {
+		body = append(body, rows...)
 	}
-	if m.editingTitle {
-		label := "Rename tracking: "
-		if m.editingGroup != "favorites" {
-			label = "Rename group: "
-		}
-		lines = append(lines, "", promptStyle.Render(label+truncate(m.titleInput, max(1, width-len(label)))+"█"), mutedStyle.Render("Enter save · Esc cancel · empty restores the folder name"))
-	}
+	body = append(body, m.editorOverlayRowsView(width)...)
 	if repository, err := m.firstCommitError(); err != nil {
-		lines = append(lines, "", errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
+		body = append(body, blankLine, errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
-	footer := fmt.Sprintf("%d repos · ↑↓ · Enter · / search · o open · g GitHub · ? help", len(m.repositories))
-	if m.localSearchActive {
-		footer = "/ " + m.localSearch + "█ · ↑/↓ move · Enter track · Esc clear search"
+	return m.fullScreen(header, body, []string{mutedStyle.Render(truncate(m.repositoryFooter(width), width))})
+}
+
+// repositoryRowsView renders the repository list. The tracked (favourite)
+// block stays pinned at the top so it is always visible; everything below it
+// scrolls through a window that only moves when the cursor crosses an edge.
+// The window is read from m.scrollTop, which Update keeps in sync.
+func (m model) repositoryRowsView(width int) []string {
+	room := m.listCapacity()
+	if room == 0 {
+		// An open editor has taken every body row; the list yields rather than
+		// pushing the prompt off the bottom of the screen.
+		return nil
 	}
-	if m.searchChooser {
-		footer = "Search · l local workspace · g GitHub repositories · Esc cancel"
-	} else if m.editorActions {
-		footer = "Open · v VS Code · p Positron · f Finder · Esc cancel"
-	} else if m.githubActions {
-		footer = "GitHub actions · o open URL · c copy URL · Esc cancel"
-	} else if m.actionStatus != "" {
-		footer = m.actionStatus
+	rows := m.repositoryListRows()
+	pinnedLen := m.pinnedRowCount(rows)
+	budget := m.rowBudget()
+
+	lines := make([]string, 0, room+1)
+	for index, row := range rows[:pinnedLen] {
+		lines = append(lines, m.repositoryRowLine(row, width, index == m.cursor))
 	}
-	if !m.searchChooser && !m.editorActions && !m.githubActions && !m.localSearchActive && m.actionStatus == "" {
-		status := m.refreshStatus(time.Now())
-		footerWidth := max(1, width-lipgloss.Width(status)-2)
-		footer = truncate(footer, footerWidth) + strings.Repeat(" ", max(1, width-lipgloss.Width(truncate(footer, footerWidth))-lipgloss.Width(status))) + status
+
+	scrollable := rows[pinnedLen:]
+	start, end, overflow := m.scrollWindow(scrollable, m.cursor-pinnedLen, budget)
+	for index, row := range scrollable[start:end] {
+		lines = append(lines, m.repositoryRowLine(row, width, pinnedLen+start+index == m.cursor))
 	}
-	lines = append(lines, "", mutedStyle.Render(truncate(footer, width)))
-	return m.fullScreen(lines)
+	if overflow {
+		lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", pinnedLen+start+1, pinnedLen+end, len(rows))))
+	}
+	return lines
+}
+
+// pinnedBlockRows returns the leading rows that never scroll: the tracked
+// section's title, every tracked group header and its repository rows. The
+// group headers inside the tracked section are keyed "favorite:", which is what
+// separates them from the scrolling "group:" rows below. A collapsed section
+// pins only its title row; there is no tracked section it returns nothing.
+func (m model) pinnedBlockRows(rows []repositoryListRow) []repositoryListRow {
+	if len(rows) == 0 || rows[0].key != "favorites" {
+		return nil
+	}
+	if m.collapsed["favorites"] {
+		return rows[:1]
+	}
+	end := 1
+	for end < len(rows) && strings.HasPrefix(rows[end].key, "favorite:") {
+		end++
+	}
+	return rows[:end]
+}
+
+// scrollWindow is the edge-crossing window over the scrollable rows: the
+// selected row moves freely inside the window and only drags it along once it
+// would otherwise leave it. That is what stops the selection from being pinned
+// to the top of the screen for the whole scroll.
+//
+// cursor is an index into rows, not into the whole list; callers holding a
+// list-wide cursor subtract the pinned block length before calling.
+func (m model) scrollWindow(rows []repositoryListRow, cursor, budget int) (int, int, bool) {
+	count := len(rows)
+	if count == 0 {
+		return 0, 0, false
+	}
+	visible := m.repositoryVisibleRows(budget, count > budget)
+	start := max(0, min(m.scrollTop, max(0, count-visible)))
+	cursorRow := max(0, min(cursor, count-1))
+	if cursorRow < start {
+		start = cursorRow
+	}
+	if cursorRow >= start+visible {
+		start = cursorRow - visible + 1
+	}
+	start = max(0, min(start, max(0, count-visible)))
+	end := min(count, start+visible)
+	return start, end, start > 0 || end < count
+}
+
+// repositoryRowLine renders one list row at the given indent.
+func (m model) repositoryRowLine(row repositoryListRow, width int, selected bool) string {
+	if row.key == "divider" {
+		return mutedStyle.Render(strings.Repeat("─", width))
+	}
+	indent := ""
+	if strings.HasPrefix(row.key, "favorite:") {
+		indent = "  "
+	}
+	if row.header {
+		prefix := "⌄ "
+		if m.collapsed[row.key] {
+			prefix = "› "
+		}
+		label := indent + prefix + truncate(strings.ToUpper(row.group), width-len(indent)-3)
+		switch {
+		case selected:
+			return cursorStyle.Render("▸ " + label)
+		case row.key == "favorites":
+			return favoriteStyle.Render("★ " + label)
+		default:
+			return groupStyle.Render(label)
+		}
+	}
+	return m.repositoryRowView(row, width, selected, indent)
+}
+
+// synchronizeScroll re-anchors the scroll window after an event that can move
+// the cursor or change the row set. View only reads scrollTop, so every
+// mutation has to happen here, inside Update.
+func (m model) synchronizeScroll() model {
+	rows := m.repositoryListRows()
+	pinned := m.pinnedRowCount(rows)
+	scrollable := rows[pinned:]
+	if len(scrollable) == 0 {
+		m.scrollTop = 0
+		return m
+	}
+	start, _, _ := m.scrollWindow(scrollable, m.cursor-pinned, m.rowBudget())
+	m.scrollTop = start
+	return m
+}
+
+// repositoryRowView renders one repository line: the tracking marker and name
+// on the left, the deadline and commit progress right-aligned.
+func (m model) repositoryRowView(row repositoryListRow, width int, selected bool, indent string) string {
+	repository := m.repositories[row.index]
+	marker := "[ ]"
+	if m.favorites[repository] {
+		marker = "[X]"
+	}
+
+	countText, deadlineText := "", ""
+	nameStyle := lipgloss.NewStyle()
+	if m.favorites[repository] {
+		deadlineText = deadlineStatus(m.effectiveDeadline(m.clock()), m.clock())
+		switch {
+		case m.commitErrors[repository] != nil:
+			countText, nameStyle = "GH ERROR", errorStyle
+		case m.loadingCommits && m.commitCounts[repository] == 0:
+			countText = m.spinner.View() + " Loading"
+		default:
+			if count, ok := m.commitCounts[repository]; ok {
+				countText, nameStyle = commitProgress(count), commitProgressStyle(count)
+			}
+		}
+	}
+
+	prefix := indent + marker + " "
+	if selected {
+		prefix = "▸ " + prefix
+	}
+	rightText := deadlineText
+	if countText != "" {
+		if rightText != "" {
+			rightText += "  "
+		}
+		rightText += countText
+	}
+	available := width - lipgloss.Width(prefix) - lipgloss.Width(rightText)
+	name := truncate(row.repository, max(1, available-1))
+	prefixText := selectedStyle.Render(prefix)
+	if selected {
+		prefixText = cursorStyle.Render(prefix)
+	}
+	rowText := prefixText + nameStyle.Render(name)
+	if rightText != "" {
+		rowText += strings.Repeat(" ", max(1, width-lipgloss.Width(rowText)-lipgloss.Width(rightText))) + rightText
+	}
+	return rowText
+}
+
+// repositoryFooter prefers the most specific active mode, and only falls back to
+// the key legend plus refresh clock when nothing else is competing for the row.
+func (m model) repositoryFooter(width int) string {
+	switch {
+	case m.localSearchActive:
+		return "/ " + m.localSearch + textCaret(m.localSearchInput.input.Cursor.Blink) + " · ↑/↓ move · Enter track · Esc clear search"
+	case m.searchChooser:
+		return "Search · l local workspace · g GitHub repositories · Esc cancel"
+	case m.editorActions:
+		return "Open · v VS Code · p Positron · f Finder · Esc cancel"
+	case m.githubActions:
+		return "GitHub actions · o open URL · c copy URL · Esc cancel"
+	case m.actionStatus != "":
+		return m.actionStatus
+	case m.cloneStatus != "":
+		return m.cloneStatus
+	}
+
+	status := m.refreshStatus(m.clock())
+	statusWidth := lipgloss.Width(status)
+	legendWidth := width - statusWidth - 2
+	if legendWidth < minLegendWidth {
+		// Too narrow for both. The bindings are actionable and the countdown is
+		// decorative, so keep the legend and drop the clock.
+		return m.helpModel(width).ShortHelpView(repoKeys.ShortHelp())
+	}
+	// The legend is built to the width it actually gets, so Bubbles elides it
+	// rather than letting it run into the status. It can still overshoot by a
+	// few cells, so the result is measured and clipped to the space left.
+	legend := m.helpModel(legendWidth).ShortHelpView(repoKeys.ShortHelp())
+	legend = truncate(legend, legendWidth)
+	return legend + strings.Repeat(" ", max(1, width-lipgloss.Width(legend)-statusWidth)) + status
 }
 
 func (m model) firstCommitError() (string, error) {
@@ -1194,15 +1773,49 @@ func (m model) moveCursor(rows []repositoryListRow, direction int) int {
 	return cursor
 }
 
-func (m model) repositoryWindow(rows []repositoryListRow) (int, int) {
-	visible := max(1, m.contentHeight()-6)
-	cursorRow := min(m.cursor, max(0, len(rows)-1))
-	start := max(0, cursorRow-visible+1)
-	end := min(len(rows), start+visible)
-	if end-start < visible {
-		start = max(0, end-visible)
+// rowBudget is the number of list rows the scrollable window may occupy: the
+// body height minus any rows the pinned tracked block has already taken.
+func (m model) rowBudget() int {
+	rows := m.repositoryListRows()
+	pinned := m.pinnedRowCount(rows)
+	if pinned >= len(rows) {
+		// Nothing left to scroll, everything fits in the pinned block.
+		return 1
 	}
-	return start, end
+	return max(1, m.listCapacity()-pinned)
+}
+
+// repositoryVisibleRows is the number of scrollable rows that fit in the row
+// budget. The overflow indicator steals a row, so it has to be accounted for
+// while scrolling rather than being appended after the fact (which would push
+// the footer off the screen).
+func (m model) repositoryVisibleRows(budget int, overflow bool) int {
+	if overflow {
+		budget--
+	}
+	return max(1, budget)
+}
+
+// pinnedRowCount is how many leading rows stay fixed: the tracked section's
+// header, its repository rows, and the divider that closes it. It is zero when
+// there is no tracked section or when the block would leave no room to scroll
+// (a pinned block with no scrollable row under it would clip the cursor off the
+// screen); the list then falls back to plain scrolling.
+func (m model) pinnedRowCount(rows []repositoryListRow) int {
+	block := m.pinnedBlockRows(rows)
+	pinned := len(block)
+	if pinned == 0 {
+		return 0
+	}
+	if pinned < len(rows) && rows[pinned].key == "divider" {
+		// The divider that closes the tracked block rides with it, so the
+		// scrollable window starts on the first row of the next group.
+		pinned++
+	}
+	if pinned+repositoryMinScrollRoom > m.listCapacity() {
+		return 0
+	}
+	return pinned
 }
 
 func repositoryGroup(repository string) (string, string) {
@@ -1213,12 +1826,152 @@ func repositoryGroup(repository string) (string, string) {
 	return parts[0], strings.Join(parts[1:], "/")
 }
 
-func (m model) fullScreen(lines []string) string {
-	width := m.viewportWidth()
-	height := m.viewportHeight()
-	content := strings.Join(lines, "\n")
-	panel := borderStyle.Width(max(1, width-6)).Height(max(1, height-4)).Render(content)
-	return "\n" + lipgloss.NewStyle().PaddingLeft(2).Render(panel) + "\n"
+// layoutMetrics derives every size from the measured frame of the styles that
+// actually draw, rather than from hand-counted offsets. width/height are the
+// full terminal; contentWidth is what a line may occupy after the gutter.
+func (m model) layoutMetrics() (width, height, contentWidth, bodyHeight int) {
+	width, height = m.viewportWidth(), m.viewportHeight()
+	contentWidth = max(1, width-chromeStyle.GetHorizontalFrameSize())
+	bodyHeight = max(layoutMinBody, height-m.chromeHeight())
+	return width, height, contentWidth, bodyHeight
+}
+
+// chromeHeight counts the rows the interface draws outside the body: the
+// header, the accent rule under it, the footer, and any vertical padding the
+// chrome style adds. Keeping this in one place is what guarantees View() emits
+// exactly viewportHeight rows.
+func (m model) chromeHeight() int {
+	return chromeStyle.GetVerticalFrameSize() + m.headerHeight() + layoutAccent + layoutFooter
+}
+
+// headerHeight is the row count headerLines() would produce, so the body can be
+// sized before the header is assembled.
+func (m model) headerHeight() int {
+	switch m.mode {
+	case repositoriesMode:
+		return len(m.repositoriesHeaderLines(1))
+	case searchMode:
+		return len(m.searchHeader())
+	default:
+		return 1
+	}
+}
+
+// clock is the single time source for the view layer. In production the tick
+// loop keeps m.now current so View() stays deterministic; models built by hand
+// (tests) have a zero now and fall back to the wall clock.
+func (m model) clock() time.Time {
+	if m.now.IsZero() {
+		return time.Now()
+	}
+	return m.now
+}
+
+// visibleRows is the number of list rows the body can show on the current
+// screen. Every scroll window is derived from this so the cursor cannot walk
+// off the bottom of a short terminal.
+func (m model) visibleRows() int {
+	return max(1, m.contentHeight())
+}
+
+// listCapacity is how many rows the windowed lists may occupy once an open text
+// editor has taken the rows it needs for itself. It can be zero on a very short
+// terminal, and the caller then renders no list rows at all: block() drops
+// overflow from the bottom, so a list that ignores the editor would be clipped
+// together with the prompt the user is typing into.
+func (m model) listCapacity() int {
+	return max(0, m.contentHeight()-m.editorOverlayRows())
+}
+
+// editorOverlayActive reports whether the current screen shows a text editor
+// that takes body rows away from the list beneath it.
+func (m model) editorOverlayActive() bool {
+	return (m.mode == repositoriesMode && m.editingTitle) || (m.mode == settingsMode && m.editingSetting != "")
+}
+
+// editorOverlayRows is how many body rows an open editor needs: a blank
+// separator, the prompt, and the hint. It is clamped to the body so the same
+// number can be reserved and rendered even on the shortest terminal.
+func (m model) editorOverlayRows() int {
+	if !m.editorOverlayActive() {
+		return 0
+	}
+	return min(3, m.contentHeight())
+}
+
+// editorOverlayRowsView builds the open editor's body rows, trimmed to the room
+// the body can spare. The hint goes before the prompt, so the text being typed
+// is the last thing to disappear on a very short terminal.
+func (m model) editorOverlayRowsView(width int) []string {
+	if !m.editorOverlayActive() {
+		return nil
+	}
+	line, hint := m.editorOverlayContent(width)
+	switch m.editorOverlayRows() {
+	case 0:
+		return nil
+	case 1:
+		return []string{line}
+	case 2:
+		return []string{line, mutedStyle.Render(truncate(hint, width))}
+	default:
+		return []string{blankLine, line, mutedStyle.Render(truncate(hint, width))}
+	}
+}
+
+// editorOverlayContent is the prompt line and its hint for the open editor. The
+// text is read here rather than at the call sites so both views reserve exactly
+// the rows they later render.
+func (m model) editorOverlayContent(width int) (string, string) {
+	switch {
+	case m.mode == repositoriesMode && m.editingTitle:
+		return m.titleField().render(width, m.titleInput), "Enter save · Esc cancel · empty restores the folder name"
+	case m.mode == settingsMode && m.editingSetting != "":
+		return m.settingValueInput.render(width, m.settingInput), "Enter save · Esc cancel"
+	}
+	return "", ""
+}
+
+// fullScreen composes header, body and footer into exactly viewportHeight lines
+// of at most viewportWidth cells. Each block is padded to its exact height, so
+// the footer always sits on the last row and the body absorbs the slack.
+func (m model) fullScreen(header, body, footer []string) string {
+	_, height, contentWidth, bodyHeight := m.layoutMetrics()
+	// Reserve the declared header height so every caller produces exactly
+	// height rows; a header shorter or taller than headerHeight() would
+	// otherwise silently push the footer off screen.
+	headerHeight := max(len(header), m.headerHeight())
+
+	composed := lipgloss.JoinVertical(lipgloss.Left,
+		block(header, contentWidth, headerHeight),
+		accentStyle.Render(strings.Repeat("─", contentWidth)),
+		block(body, contentWidth, bodyHeight),
+		block(footer, contentWidth, layoutFooter),
+	)
+
+	composed = lipgloss.NewStyle().MaxWidth(contentWidth).MaxHeight(height).Render(composed)
+	return chromeStyle.MaxHeight(height).Render(composed)
+}
+
+// block renders lines as a fixed-width, fixed-height region. Lines past height
+// are dropped from the bottom and short blocks are padded with blanks, so the
+// frame geometry never depends on how much content a screen happens to have.
+func block(lines []string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	blank := strings.Repeat(" ", width)
+	padded := make([]string, 0, height)
+	for _, line := range lines {
+		padded = append(padded, lipgloss.NewStyle().Width(width).MaxWidth(width).Render(truncate(line, width)))
+	}
+	for len(padded) < height {
+		padded = append(padded, blank)
+	}
+	return strings.Join(padded, "\n")
 }
 
 func (m model) viewportWidth() int {
@@ -1235,39 +1988,37 @@ func (m model) viewportHeight() int {
 	return 24
 }
 
+// contentWidth is the usable width of a body line, excluding the gutter.
 func (m model) contentWidth() int {
-	return max(1, m.viewportWidth()-10)
+	_, _, contentWidth, _ := m.layoutMetrics()
+	return contentWidth
 }
 
+// contentHeight is the usable height of the body region.
 func (m model) contentHeight() int {
-	return max(1, m.viewportHeight()-6)
+	_, _, _, bodyHeight := m.layoutMetrics()
+	return bodyHeight
 }
 
+// truncate fits value into width cells, accounting for wide characters, emoji
+// sequences and pre-existing ANSI escapes.
 func truncate(value string, width int) string {
-	runes := []rune(value)
-	if len(runes) <= width {
-		return value
+	if width <= 0 {
+		return ""
 	}
-	if width <= 1 {
-		return string(runes[:width])
-	}
-	return string(runes[:width-1]) + "…"
+	return ansi.Truncate(value, width, "…")
 }
 
+// truncateLeft keeps the tail of value within width cells, for paths and inputs
+// where the end is the interesting part.
 func truncateLeft(value string, width int) string {
-	runes := []rune(value)
-	if len(runes) <= width {
+	if width <= 0 {
+		return ""
+	}
+	if ansi.StringWidth(value) <= width {
 		return value
 	}
-	if width <= 1 {
-		return string(runes[len(runes)-width:])
-	}
-	return "…" + string(runes[len(runes)-width+1:])
-}
-
-func commitProgress(count int) string {
-	style := commitProgressStyle(count)
-	return style.Render(commitProgressBar(count)) + " " + style.Render(fmt.Sprintf("%d/%d", count, commitGoal))
+	return ansi.TruncateLeft(value, ansi.StringWidth(value)-width+1, "…")
 }
 
 func deadlineStatus(deadline, now time.Time) string {
@@ -1288,19 +2039,40 @@ func deadlineStatus(deadline, now time.Time) string {
 	}
 }
 
-func commitProgressBar(count int) string {
-	filled := min(max(count, 0), commitGoal) * commitProgressWidth / commitGoal
-	return strings.Repeat("█", filled) + strings.Repeat("░", commitProgressWidth-filled)
+// commitProgressRatio maps a commit count onto 0..1 for the bar. The goal is a
+// floor, not a ceiling, so anything at or above it fills the track completely.
+func commitProgressRatio(count int) float64 {
+	return float64(min(max(count, 0), commitGoal)) / float64(commitGoal)
 }
 
+// commitProgress renders the tracking progress. The count text always follows
+// the bar, and the bar's fill is what actually encodes progress, so the state
+// survives NO_COLOR and colour-vision differences.
+func commitProgress(count int) string {
+	style := commitProgressStyle(count)
+	return style.Render(commitProgressBar(count)) + " " + style.Render(fmt.Sprintf("%d/%d", count, commitGoal))
+}
+
+// commitProgressBar renders the fixed-width track through Bubbles' progress
+// component. ViewAs is deliberately used instead of View: it renders a
+// percentage without mutating the component, which keeps View() a pure function
+// of the model.
+func commitProgressBar(count int) string {
+	return commitBarStyle.ViewAs(commitProgressRatio(count))
+}
+
+// commitProgressStyle colours the bar by how far along the week is. It uses one
+// hue per state rather than a red/amber/green traffic light: the fill glyphs
+// already carry the magnitude, so colour only has to reinforce it, and the
+// display stays readable for colourblind users and under NO_COLOR.
 func commitProgressStyle(count int) lipgloss.Style {
 	switch {
 	case count >= commitGoal:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
-	case count == 2:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+		return lipgloss.NewStyle().Foreground(colorSuccess)
+	case count >= commitGoal/2:
+		return lipgloss.NewStyle().Foreground(colorPending)
 	default:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+		return lipgloss.NewStyle().Foreground(colorTracked)
 	}
 }
 
@@ -1332,7 +2104,10 @@ func loadTrackedCommitCounts(workspace string, repositories []string, favorites 
 	return func() tea.Msg {
 		counts := make(map[string]int)
 		failures := make(map[string]error)
-		if username == "" {
+		if strings.TrimSpace(username) == "" && strings.TrimSpace(profileName) == "" {
+			// Nothing to match commits against. A configured profile display
+			// name is still usable on its own, so only bail when both are
+			// missing.
 			return commitCountsMsg{counts: counts, errors: failures, repositories: repositories}
 		}
 		for _, repository := range repositories {
@@ -1600,16 +2375,15 @@ func normalizeGitHubHost(host string) string {
 	return strings.TrimSuffix(host, "/")
 }
 
-func removeLastRune(value string) string {
-	runes := []rune(value)
-	if len(runes) == 0 {
-		return value
+// isTextEditingKey reports whether a key inserts or deletes text. Arrow keys
+// are deliberately excluded: textinput binds left/right to its own cursor, but
+// in this interface they must keep driving list navigation.
+func isTextEditingKey(msg tea.KeyMsg) bool {
+	switch msg.Type {
+	case tea.KeyRunes, tea.KeySpace, tea.KeyBackspace, tea.KeyDelete, tea.KeyCtrlH, tea.KeyCtrlU, tea.KeyCtrlW, tea.KeyCtrlK:
+		return true
 	}
-	return string(runes[:len(runes)-1])
-}
-
-func isTextInputKey(msg tea.KeyMsg) bool {
-	return msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace
+	return false
 }
 
 func saveConfig(stored config) error {
