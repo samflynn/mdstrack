@@ -1293,25 +1293,45 @@ func TestGroupHeaderBadgeCountsMembersAndSkipsSingleton(t *testing.T) {
 	}
 }
 
-func TestTreeGuidesUseTeeAndCloseWithElbow(t *testing.T) {
+func TestTreeGuidesNestUnderTheHeadingAndCloseEveryGroup(t *testing.T) {
 	m := repositoriesModel(time.Now())
 	lines := map[string]string{}
+	headings := map[string]string{}
 	for _, row := range m.repositoryListRows() {
-		if !row.header {
-			lines[row.repository] = ansi.Strip(m.repositoryRowLine(row, 40, false))
+		line := ansi.Strip(m.repositoryRowLine(row, 40, false))
+		if row.header {
+			headings[row.key] = line
+			continue
 		}
+		if row.key == "divider" {
+			continue
+		}
+		lines[row.repository] = line
 	}
-	// alpha is the only member of the last group in the tracked block, so its
-	// branch closes; beta is first of two in the untracked 511 group, so it
-	// leaves a tee behind for gamma to hang from.
-	if !strings.Contains(lines["alpha"], treeBranchElbow) {
-		t.Fatalf("expected the final tracked row to close with an elbow, got %q", lines["alpha"])
-	}
-	if !strings.Contains(lines["beta"], treeRootTee) {
+	// beta is the first of two in the untracked 511 group, so it leaves a tee
+	// behind for delta to hang from, and delta is last so its branch closes.
+	if !strings.HasPrefix(lines["beta"], treeChildTee) {
 		t.Fatalf("expected a non-final row to use a tee, got %q", lines["beta"])
 	}
-	if !strings.Contains(lines["gamma"], treeRootElbow) {
-		t.Fatalf("expected the final untracked row to close with an elbow, got %q", lines["gamma"])
+	if !strings.HasPrefix(lines["delta"], treeChildElbow) {
+		t.Fatalf("expected the final row of a group to close with an elbow, got %q", lines["delta"])
+	}
+	// gamma sits alone in 521, so it is simultaneously the first and last row of
+	// its group and must still close rather than dangle a tee.
+	if !strings.HasPrefix(lines["gamma"], treeChildElbow) {
+		t.Fatalf("expected a single member group to close with an elbow, got %q", lines["gamma"])
+	}
+	// The regression this guards: a heading must never be indented deeper than
+	// the repositories beneath it, or the group reads as a child of its members.
+	if !strings.HasPrefix(headings["group:511"], rowGroupBar) {
+		t.Fatalf("expected the heading to sit at the root of the list, got %q", headings["group:511"])
+	}
+	// Every repository row is pushed right by its branch guide, so the heading
+	// stays flush at the root and the members read as nested underneath it.
+	for name, line := range lines {
+		if !strings.HasPrefix(line, treeChildTee) && !strings.HasPrefix(line, treeChildElbow) {
+			t.Fatalf("expected %s to be indented under its heading, got %q", name, line)
+		}
 	}
 }
 

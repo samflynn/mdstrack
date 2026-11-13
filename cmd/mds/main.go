@@ -90,15 +90,15 @@ const (
 	rowExpanded       = "⌄ "
 )
 
-// Tree guides. Repositories hang one level below their group, so their guide
-// lives in the root column and closes with an elbow under the final group.
-// Group headers live in the branch column, under the section header above them.
+// Tree guides. Every group heading sits at the root of the list and its
+// repositories hang one level below it, so the children carry a branch tee or
+// elbow in the indented column while the heading carries none. Indenting the
+// children rather than the headings is what makes a group read as the parent of
+// the rows beneath it; the earlier scheme did the opposite and inverted the
+// hierarchy on screen.
 const (
-	treeIndent      = "  "
-	treeRootTee     = "├─ "
-	treeRootElbow   = "└─ "
-	treeBranchTee   = "│  ├─ "
-	treeBranchElbow = "│  └─ "
+	treeChildTee   = "  ├─ "
+	treeChildElbow = "  └─ "
 )
 
 // shimmerHead and shimmerTrail draw the indeterminate loading track. The width
@@ -120,6 +120,11 @@ const (
 // chromeStyle frames the whole interface. It carries the gutter and nothing
 // else, so layoutMetrics can measure padding rather than guessing at offsets.
 var chromeStyle = lipgloss.NewStyle().Padding(0, 0, 0, layoutGutter)
+
+// rowGroupBar is the solid accent bar a group heading opens with. It gives a
+// heading a shape the coloured, glyph-prefixed repository rows beneath it never
+// have, so the two are separable by silhouette and not only by colour.
+const rowGroupBar = "▌ "
 
 const statusLifetime = 4 * time.Second
 
@@ -248,15 +253,12 @@ type repositoryListRow struct {
 	index      int
 	key        string
 	header     bool
-	// count is how many repositories the header row stands for. Group headers
-	// carry it as a badge so a collapsed group still reports its size.
+	// count is how many repositories the heading stands for, shown as a badge
+	// when it says more than the rows beneath it already do.
 	count int
-	// last marks the final child of a group, so the tree guide can close the
-	// branch with an elbow instead of a tee.
-	last bool
-	// rootLast marks the member of the final group in its section, so the
-	// guide above it stays a straight line rather than a branch.
-	rootLast bool
+	// childTail marks the final row of a group, so the branch under it closes
+	// with an elbow rather than leaving a tee pointing at nothing.
+	childTail bool
 }
 
 // keyMap describes the repository list bindings once, so the persistent footer
@@ -408,13 +410,17 @@ var (
 	errorStyle       = lipgloss.NewStyle().Foreground(colorDanger)
 	promptStyle      = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
 	selectedStyle    = lipgloss.NewStyle().Foreground(colorAccent)
-	groupStyle       = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
-	favoriteStyle    = lipgloss.NewStyle().Foreground(colorTracked).Italic(true).Bold(true)
 	cursorStyle      = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
 	inactiveStyle    = lipgloss.NewStyle().Foreground(colorInactive)
-	inactiveItalic   = lipgloss.NewStyle().Foreground(colorInactive).Italic(true)
 	celebratingStyle = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
-	selectionBand    = lipgloss.NewStyle().Background(colorSelection)
+	// groupHeaderStyle is deliberately the boldest thing in the list. Repository
+	// rows stay dim and every group heading is bright, so the headings are what
+	// the eye catches first when scanning for a course.
+	groupHeaderStyle = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
+	// groupBadgeStyle renders the repository count beside a heading, where a
+	// dim count reads as metadata instead of competing with the heading.
+	groupBadgeStyle = lipgloss.NewStyle().Foreground(colorMuted)
+	selectionBand   = lipgloss.NewStyle().Background(colorSelection)
 	// noBand is the explicit absence of a background. lipgloss renders an
 	// unset background and a NoColor background identically (no escape codes at
 	// all), but naming it keeps the segmented row renderer's two branches
@@ -1902,63 +1908,59 @@ func (m model) scrollWindow(rows []repositoryListRow, cursor, budget int) (int, 
 }
 
 // repositoryRowLine renders one list row. Rows carry their own tree position so
-// the list reads as a hierarchy rather than a flat indentation, and groups
-// outside the tracking block are dimmed so the eye lands on what is tracked.
+// the list reads as a hierarchy rather than a flat indentation: headings sit at
+// the root and their repositories hang a level below, with a spine running down
+// the heading column between them.
 func (m model) repositoryRowLine(row repositoryListRow, width int, selected bool) string {
 	if row.key == "divider" {
 		return mutedStyle.Render(strings.Repeat("─", width))
 	}
 	band := m.rowBand(selected)
-	// treeRoot and treeBranch are the two guide columns: rows in the final group
-	// of a section hang off the root, everything else hangs off a branch, so the
-	// guides never point at a row that does not exist.
-	indent := ""
-	switch {
-	case row.key == "favorites":
-		indent = treeIndent
-	case !row.header && strings.HasPrefix(row.key, "favorite:"):
-		indent = treeBranchTee
-		if row.last {
-			indent = treeBranchElbow
-		}
-	case !row.header:
-		indent = treeRootElbow
-		if !row.rootLast {
-			indent = treeRootTee
-		}
-	case strings.HasPrefix(row.key, "favorite:"), strings.HasPrefix(row.key, "group:"):
-		indent = treeBranchTee
-		if row.last {
-			indent = treeBranchElbow
-		}
-	}
 	if row.header {
-		prefix := "⌄ "
-		if m.collapsed[row.key] {
-			prefix = "› "
-		}
-		label := indent + prefix + strings.ToUpper(row.group)
-		// A one member group is already obvious from the single row beneath it,
-		// so the badge only appears when it says something you cannot just see.
-		if row.count > 1 {
-			label += fmt.Sprintf(" (%d)", row.count)
-		}
-		label = truncate(label, width-len(rowSelectionGlyph))
-		lead := ""
-		body := label
-		style := groupStyle
-		switch {
-		case selected:
-			lead, style = rowSelectionGlyph, cursorStyle
-		case row.key == "favorites":
-			lead, style = rowFavoriteGlyph, favoriteStyle
-		case strings.HasPrefix(row.key, "favorite:"):
-		default:
-			style = inactiveItalic
-		}
-		return lead + style.Inherit(band).Render(body) + m.rowBandPadding(lead+body, width, band)
+		return m.groupHeaderLine(row, width, selected, band)
+	}
+	indent := treeChildTee
+	if row.childTail {
+		indent = treeChildElbow
 	}
 	return m.repositoryRowView(row, width, selected, indent, band)
+}
+
+// groupHeaderLine renders a group heading. The heading is the one row in the
+// list that is not a repository, so it is given a different shape as well as a
+// different colour: a solid accent bar, the tree spine, and a bold upper case
+// label in the brand colour, while repository rows stay dim, glyph-prefixed,
+// and muted. Colour is the last cue to arrive, not the only one.
+// groupHeaderLine renders a group heading. A heading is the one row in the list
+// that is not a repository, so it is given a different silhouette as well as a
+// different colour: no branch guide, a solid accent bar, and a bold upper case
+// label in the brand colour. Repository rows stay dim, glyph-prefixed, and
+// indented beneath it. Colour is the last cue to arrive, not the only one.
+func (m model) groupHeaderLine(row repositoryListRow, width int, selected bool, band lipgloss.Style) string {
+	prefix := rowExpanded
+	if m.collapsed[row.key] {
+		prefix = rowCollapsed
+	}
+	badge := ""
+	if row.count > 1 {
+		// A one member group is already obvious from the single row beneath it,
+		// so the badge only appears when it says something you cannot just see.
+		badge = fmt.Sprintf(" (%d)", row.count)
+	}
+	// The badge is deliberately the same dim ink as a repository name, so it
+	// reads as metadata beside the heading instead of competing with it.
+	label := truncate(strings.ToUpper(row.group), max(1, width-lipgloss.Width(rowGroupBar)-len(prefix)-lipgloss.Width(badge)))
+	// A heading can hold the cursor, so it needs the same selection glyph a
+	// repository row carries; without it the cursor would sit on a heading with
+	// nothing on screen to say so.
+	lead := ""
+	if selected {
+		lead = rowSelectionGlyph
+	}
+	plain := lead + rowGroupBar + prefix + label + badge
+	rendered := groupHeaderStyle.Inherit(band).Render(lead+rowGroupBar+prefix+label) +
+		groupBadgeStyle.Inherit(band).Render(badge)
+	return rendered + m.rowBandPadding(plain, width, band)
 }
 
 // rowBand is the background behind the selected row. Every segment of a row
@@ -2216,7 +2218,10 @@ func (m model) repositoryListRows() []repositoryListRow {
 	}
 	rows := []repositoryListRow{}
 	if len(favorites) > 0 {
-		rows = append(rows, repositoryListRow{group: m.favoritesDisplayTitle(), key: "favorites", header: true, count: len(favorites)})
+		rows = append(rows, repositoryListRow{
+			group: m.favoritesDisplayTitle(), key: "favorites", header: true,
+			count: len(favorites),
+		})
 		if !m.collapsed["favorites"] {
 			rows = appendGroupedRepositoryRows(rows, m.repositories, favorites, "favorite:", m.collapsed, m.groupTitles)
 		}
@@ -2242,10 +2247,6 @@ func appendGroupedRepositoryRows(rows []repositoryListRow, repositories []string
 		members[group]++
 		finalPosition[group] = position
 	}
-	finalGroup := ""
-	if len(groupOrder) > 0 {
-		finalGroup = groupOrder[len(groupOrder)-1]
-	}
 	previousGroup := ""
 	for position, index := range indexes {
 		group, name := repositoryGroup(repositories[index])
@@ -2257,25 +2258,18 @@ func appendGroupedRepositoryRows(rows []repositoryListRow, repositories []string
 			}
 			rows = append(rows, repositoryListRow{
 				group: displayGroup, rawGroup: group, key: key, header: true,
-				count: members[group], last: group == finalGroup,
+				count: members[group],
 			})
 			previousGroup = group
 		}
 		if !collapsed[key] {
 			rows = append(rows, repositoryListRow{
 				repository: name, index: index, key: prefix + "repository",
-				last: finalPosition[group] == position, rootLast: rowLastGroup(group, finalGroup),
+				childTail: finalPosition[group] == position,
 			})
 		}
 	}
 	return rows
-}
-
-// rowLastGroup reports whether the child's group is the final group of the
-// section. Repositories live at most one level below a group, so the guide
-// above them is straight when their group is last and a tee otherwise.
-func rowLastGroup(group, finalGroup string) bool {
-	return group == finalGroup
 }
 
 func (m model) moveCursor(rows []repositoryListRow, direction int) int {
