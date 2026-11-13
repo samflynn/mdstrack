@@ -133,6 +133,8 @@ type model struct {
 	hideCloned             bool
 	clonedRepositories     map[string]bool
 	cloneConfirmation      string
+	cloneFolderInput       string
+	enteringCloneFolder    bool
 	cloneStatus            string
 	cursor                 int
 	err                    error
@@ -561,12 +563,36 @@ func (m model) settingsView() string {
 }
 
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.enteringCloneFolder {
+		switch msg.String() {
+		case "enter":
+			folder, err := cloneFolderName(m.cloneFolderInput)
+			if err != nil {
+				m.cloneStatus = err.Error()
+				return m, nil
+			}
+			repository := m.cloneConfirmation
+			m.cloneConfirmation, m.cloneFolderInput, m.enteringCloneFolder, m.cloneStatus = "", "", false, ""
+			return m, cloneGitHubRepository(m.path, m.githubHost, repository, folder)
+		case "esc":
+			m.cloneFolderInput, m.enteringCloneFolder = "", false
+		case "backspace", "ctrl+h":
+			m.cloneFolderInput = removeLastRune(m.cloneFolderInput)
+		default:
+			if isTextInputKey(msg) {
+				m.cloneFolderInput += string(msg.Runes)
+			}
+		}
+		return m, nil
+	}
 	if m.cloneConfirmation != "" {
 		switch msg.String() {
 		case "y":
 			repository := m.cloneConfirmation
 			m.cloneConfirmation = ""
-			return m, cloneGitHubRepository(m.path, m.githubHost, repository)
+			return m, cloneGitHubRepository(m.path, m.githubHost, repository, "")
+		case "f":
+			m.enteringCloneFolder = true
 		case "n", "esc":
 			m.cloneConfirmation = ""
 		}
@@ -635,7 +661,14 @@ func (m model) searchView() string {
 	}
 	footer := "Type to filter · ↑/↓ move · Enter clone · " + hideClonedLabel + " · Esc back · q quit"
 	if m.cloneConfirmation != "" {
-		footer = "Clone " + m.cloneConfirmation + " into workspace? y yes · n no"
+		if m.enteringCloneFolder {
+			footer = "New folder: " + m.cloneFolderInput + "█ · Enter create & clone · Esc back"
+			if m.cloneStatus != "" {
+				footer = m.cloneStatus + " · " + footer
+			}
+		} else {
+			footer = "Clone " + m.cloneConfirmation + "? y workspace · f new folder · n no"
+		}
 	} else if m.cloneStatus != "" {
 		footer = m.cloneStatus
 	}
@@ -1370,10 +1403,31 @@ func findClonedRepositories(workspace string, repositories []string, configuredH
 	}
 }
 
-func cloneGitHubRepository(workspace, host, repository string) tea.Cmd {
+func cloneFolderName(value string) (string, error) {
+	folder := strings.TrimSpace(value)
+	if folder == "" {
+		return "", errors.New("enter a folder name")
+	}
+	if folder == "." || folder == ".." || filepath.Base(folder) != folder {
+		return "", errors.New("folder name must not contain a path")
+	}
+	return folder, nil
+}
+
+func cloneGitHubRepository(workspace, host, repository, folder string) tea.Cmd {
 	return func() tea.Msg {
 		name := filepath.Base(repository)
-		destination := filepath.Join(workspace, name)
+		destinationRoot := workspace
+		if folder != "" {
+			destinationRoot = filepath.Join(workspace, folder)
+			if err := os.Mkdir(destinationRoot, 0o755); err != nil {
+				if errors.Is(err, os.ErrExist) {
+					return cloneRepositoryMsg{repository: repository, path: destinationRoot, err: fmt.Errorf("folder %q already exists", folder)}
+				}
+				return cloneRepositoryMsg{repository: repository, path: destinationRoot, err: fmt.Errorf("create folder %q: %w", folder, err)}
+			}
+		}
+		destination := filepath.Join(destinationRoot, name)
 		if _, err := os.Stat(destination); err == nil {
 			return cloneRepositoryMsg{repository: repository, path: destination, err: fmt.Errorf("destination %q already exists", name)}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -1382,6 +1436,11 @@ func cloneGitHubRepository(workspace, host, repository string) tea.Cmd {
 		url := fmt.Sprintf("https://%s/%s.git", host, repository)
 		output, err := exec.Command("git", "clone", url, destination).CombinedOutput()
 		if err != nil {
+			if folder != "" {
+				if removeErr := os.Remove(destinationRoot); removeErr != nil {
+					return cloneRepositoryMsg{repository: repository, path: destination, err: fmt.Errorf("git clone: %s; remove empty folder %q: %w", strings.TrimSpace(string(output)), folder, removeErr)}
+				}
+			}
 			return cloneRepositoryMsg{repository: repository, path: destination, err: fmt.Errorf("git clone: %s", strings.TrimSpace(string(output)))}
 		}
 		return cloneRepositoryMsg{repository: repository, path: destination}

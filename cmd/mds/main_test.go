@@ -394,7 +394,7 @@ func TestSearchCloneRequiresConfirmation(t *testing.T) {
 	if got, want := m.cloneConfirmation, "mds-2026-27/DSCI_511_lab1"; got != want {
 		t.Fatalf("clone confirmation = %q, want %q", got, want)
 	}
-	if view := m.searchView(); !strings.Contains(view, "Clone mds-2026-27/DSCI_511_lab1") || !strings.Contains(view, "y yes") || !strings.Contains(view, "n no") || lipgloss.Height(view) != m.viewportHeight() {
+	if view := m.searchView(); !strings.Contains(view, "Clone mds-2026-27/DSCI_511_lab1") || !strings.Contains(view, "y workspace") || !strings.Contains(view, "f new folder") || !strings.Contains(view, "n no") || lipgloss.Height(view) != m.viewportHeight() {
 		t.Fatalf("expected terminal-safe clone confirmation footer, got %q", view)
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
@@ -409,10 +409,49 @@ func TestCloneGitHubRepositoryRefusesExistingDestination(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(workspace, "DSCI_511_lab1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	message := cloneGitHubRepository(workspace, "github.ubc.ca", "mds-2026-27/DSCI_511_lab1")()
+	message := cloneGitHubRepository(workspace, "github.ubc.ca", "mds-2026-27/DSCI_511_lab1", "")()
 	result, ok := message.(cloneRepositoryMsg)
 	if !ok || result.err == nil || !strings.Contains(result.err.Error(), "already exists") {
 		t.Fatalf("clone result = %#v, want existing destination error", message)
+	}
+}
+
+func TestSearchCloneCanCreateNamedFolder(t *testing.T) {
+	m := model{mode: searchMode, width: 80, height: 20, searchResults: []githubSearchRepository{{FullName: "mds-2026-27/DSCI_511_lab1"}}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	m = updated.(model)
+	if !m.enteringCloneFolder {
+		t.Fatal("expected f to request a new clone folder")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("week-one")})
+	m = updated.(model)
+	if view := m.searchView(); !strings.Contains(view, "New folder: week-one") || !strings.Contains(view, "Enter create & clone") {
+		t.Fatalf("expected folder prompt, got %q", view)
+	}
+	if folder, err := cloneFolderName(m.cloneFolderInput); err != nil || folder != "week-one" {
+		t.Fatalf("clone folder = (%q, %v), want week-one", folder, err)
+	}
+}
+
+func TestCloneFolderNameRejectsPaths(t *testing.T) {
+	for _, value := range []string{"", ".", "..", "course/week-one", "../outside"} {
+		if _, err := cloneFolderName(value); err == nil {
+			t.Errorf("cloneFolderName(%q) succeeded, want error", value)
+		}
+	}
+}
+
+func TestSearchCloneFolderShowsValidationError(t *testing.T) {
+	m := model{mode: searchMode, width: 80, height: 20, cloneConfirmation: "mds-2026-27/DSCI_511_lab1", enteringCloneFolder: true, cloneFolderInput: "week/one", favorites: map[string]bool{}, collapsed: map[string]bool{}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if got, want := m.cloneStatus, "folder name must not contain a path"; got != want {
+		t.Fatalf("clone folder error = %q, want %q", got, want)
+	}
+	if !strings.Contains(m.searchView(), m.cloneStatus) {
+		t.Fatalf("expected folder validation error in search view")
 	}
 }
 
