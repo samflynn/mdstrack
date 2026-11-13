@@ -763,7 +763,7 @@ func TestHeadersAreSelectableAndCollapseGroups(t *testing.T) {
 
 func TestFavoritesArePinnedAndCanCollapse(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	m := model{mode: repositoriesMode, path: "/tmp/mds", repositories: []string{"511/lab-one", "511/lab-two", "523/lab-one"}, favorites: map[string]bool{"511/lab-one": true, "511/lab-two": true}, collapsed: map[string]bool{}}
+	m := model{mode: repositoriesMode, path: "/tmp/mds", repositories: []string{"511/alpha", "511/beta", "523/lab-one"}, favorites: map[string]bool{"511/alpha": true, "511/beta": true}, collapsed: map[string]bool{}}
 	rows := m.repositoryListRows()
 	if !rows[0].header || rows[0].key != "favorites" {
 		t.Fatalf("first row = %#v, want the favorites header", rows[0])
@@ -773,8 +773,8 @@ func TestFavoritesArePinnedAndCanCollapse(t *testing.T) {
 	if !m.collapsed["favorites"] {
 		t.Fatal("expected Enter on favorites to collapse it")
 	}
-	if strings.Contains(m.repositoriesView(), "[X]") {
-		t.Fatal("expected collapsed favorites to hide favorite repositories")
+	if view := m.repositoriesView(); strings.Contains(view, "alpha") || strings.Contains(view, "beta") {
+		t.Fatalf("expected collapsed favorites to hide their repositories, got:\n%s", view)
 	}
 }
 
@@ -1251,5 +1251,274 @@ func TestTrackedCommitCountsAcceptProfileNameAlone(t *testing.T) {
 	counts, _ = message.(commitCountsMsg)
 	if len(counts.errors) != 0 {
 		t.Fatalf("errors = %v, want no lookup when both identifier fields are blank", counts.errors)
+	}
+}
+
+// repositoriesModel is the small fixture the presentation tests share: two
+// groups, one tracked repository, and a fixed clock so deadline wording and
+// celebration windows never depend on when the suite runs.
+func repositoriesModel(now time.Time) model {
+	m := model{
+		mode: repositoriesMode, path: "/tmp/mds", favoritesTitle: "Priority",
+		repositories: []string{"511/alpha", "511/beta", "511/delta", "521/gamma"},
+		favorites:    map[string]bool{"511/alpha": true},
+		commitCounts: map[string]int{"511/alpha": 1},
+		commitErrors: map[string]error{},
+		collapsed:    map[string]bool{}, groupTitles: map[string]string{},
+		celebrating: map[string]bool{}, celebratedUntil: map[string]time.Time{},
+		now: now,
+	}
+	m.spinner = newModelSpinner()
+	m.help = newModelHelp()
+	m.width, m.height = 80, 20
+	return m
+}
+
+func TestGroupHeaderBadgeCountsMembersAndSkipsSingleton(t *testing.T) {
+	m := repositoriesModel(time.Now())
+	var badges []string
+	for _, row := range m.repositoryListRows() {
+		if row.header && strings.HasPrefix(row.key, "group:") {
+			badges = append(badges, m.repositoryRowLine(row, 40, false))
+		}
+	}
+	// 511 has two members and 521 only one, so only 511 earns a badge: a count
+	// of one is already visible from the single row beneath it.
+	joined := ansi.Strip(strings.Join(badges, "\n"))
+	if !strings.Contains(joined, "511 (2)") {
+		t.Fatalf("expected the two member group to show a count badge, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "521 (1)") {
+		t.Fatalf("expected a single member group to omit its badge, got:\n%s", joined)
+	}
+}
+
+func TestTreeGuidesUseTeeAndCloseWithElbow(t *testing.T) {
+	m := repositoriesModel(time.Now())
+	lines := map[string]string{}
+	for _, row := range m.repositoryListRows() {
+		if !row.header {
+			lines[row.repository] = ansi.Strip(m.repositoryRowLine(row, 40, false))
+		}
+	}
+	// alpha is the only member of the last group in the tracked block, so its
+	// branch closes; beta is first of two in the untracked 511 group, so it
+	// leaves a tee behind for gamma to hang from.
+	if !strings.Contains(lines["alpha"], treeBranchElbow) {
+		t.Fatalf("expected the final tracked row to close with an elbow, got %q", lines["alpha"])
+	}
+	if !strings.Contains(lines["beta"], treeRootTee) {
+		t.Fatalf("expected a non-final row to use a tee, got %q", lines["beta"])
+	}
+	if !strings.Contains(lines["gamma"], treeRootElbow) {
+		t.Fatalf("expected the final untracked row to close with an elbow, got %q", lines["gamma"])
+	}
+}
+
+func TestStateMarkerEncodesEveryRepositoryState(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name   string
+		adjust func(*model)
+		repo   string
+		want   string
+	}{
+		{"untracked", func(m *model) {}, "511/beta", untrackedMarker},
+		{"tracked", func(m *model) {}, "511/alpha", trackedMarker},
+		{"goal", func(m *model) { m.commitCounts["511/alpha"] = commitGoal }, "511/alpha", doneMarker},
+		{"celebrating", func(m *model) {
+			m.commitCounts["511/alpha"] = commitGoal
+			m.celebrating["511/alpha"] = true
+			m.celebratedUntil["511/alpha"] = now.Add(celebrateFor)
+		}, "511/alpha", celebratingMarker},
+	} {
+		// The marker is the rescue cue when colour is unavailable, so each state
+		// has to differ by glyph and not only by style.
+		m := repositoriesModel(now)
+		tc.adjust(&m)
+		for _, row := range m.repositoryListRows() {
+			if row.header || m.repositories[row.index] != tc.repo {
+				continue
+			}
+			if line := ansi.Strip(m.repositoryRowLine(row, 50, false)); !strings.Contains(line, tc.want) {
+				t.Fatalf("%s: expected marker %q in %q", tc.name, tc.want, line)
+			}
+			break
+		}
+	}
+}
+
+func TestCelebrationEndsOnItsOwnClock(t *testing.T) {
+	now := time.Now()
+	m := repositoriesModel(now)
+	m.celebrating["511/alpha"] = true
+	m.celebratedUntil["511/alpha"] = now.Add(celebrateFor)
+	if !m.isCelebrating("511/alpha") {
+		t.Fatal("expected a fresh celebration to be active")
+	}
+	// The cue has to expire without waiting for a message, because nothing else
+	// clears it: the footer status that announced it expires earlier.
+	m.now = now.Add(celebrateFor)
+	if m.isCelebrating("511/alpha") {
+		t.Fatal("expected the celebration to lapse once its window closed")
+	}
+}
+
+func TestCommitCountsCelebrateTheGoalExactlyOnce(t *testing.T) {
+	m := repositoriesModel(time.Now())
+	updated, _ := m.Update(commitCountsMsg{counts: map[string]int{"511/alpha": commitGoal}, errors: map[string]error{}, repositories: []string{"511/alpha"}})
+	m = updated.(model)
+	if !m.isCelebrating("511/alpha") {
+		t.Fatal("expected the first crossing of the goal to celebrate")
+	}
+	firstWindow := m.celebratedUntil["511/alpha"]
+
+	updated, _ = m.Update(commitCountsMsg{counts: map[string]int{"511/alpha": commitGoal}, errors: map[string]error{}, repositories: []string{"511/alpha"}})
+	m = updated.(model)
+	if !m.celebrating["511/alpha"] || !m.celebratedUntil["511/alpha"].Equal(firstWindow) {
+		t.Fatal("expected a repeated refresh at the goal not to restart the celebration")
+	}
+}
+
+func TestDeadlineLineCarriesPhraseAndWeekTrack(t *testing.T) {
+	deadline := time.Date(2026, time.November, 14, 9, 0, 0, 0, time.UTC)
+	now := deadline.AddDate(0, 0, -4)
+	m := repositoriesModel(now)
+	line := ansi.Strip(m.deadlineLine(deadline, now))
+	if !strings.Contains(line, "4 days left") {
+		t.Fatalf("expected the calendar phrase in %q", line)
+	}
+	if got, want := strings.Count(line, deadlineTrackFill)+strings.Count(line, deadlineTrackEmpty), deadlineTrackCells; got != want {
+		t.Fatalf("track = %d cells, want %d: %q", got, want, line)
+	}
+	// The track is drawn with distinct fill and empty glyphs, so the countdown
+	// still reads without colour.
+	if !strings.Contains(line, deadlineTrackFill) || !strings.Contains(line, deadlineTrackEmpty) {
+		t.Fatalf("expected both track glyphs in %q", line)
+	}
+
+	overdue := repositoriesModel(deadline.AddDate(0, 0, 2))
+	if line := ansi.Strip(overdue.deadlineLine(deadline, overdue.now)); strings.Contains(line, deadlineTrackFill) {
+		t.Fatalf("expected a past deadline to show an empty track, got %q", line)
+	}
+}
+
+func TestDeadlinePulseOnlyRunsInsideTheLastDay(t *testing.T) {
+	deadline := time.Date(2026, time.November, 14, 9, 0, 0, 0, time.UTC)
+	far := repositoriesModel(deadline.AddDate(0, 0, -4))
+	far.deadlineOverride = "2026-11-14"
+	if far.deadlinePulseActive() {
+		t.Fatal("expected no pulse four days out")
+	}
+	last := repositoriesModel(deadline)
+	last.deadlineOverride = "2026-11-14"
+	if !last.deadlinePulseActive() {
+		t.Fatal("expected a pulse on the deadline day")
+	}
+	// The cue is about a deadline that exists, so an empty tracking block has
+	// nothing to breathe for.
+	untracked := repositoriesModel(deadline)
+	untracked.favorites = map[string]bool{}
+	untracked.deadlineOverride = "2026-11-14"
+	if untracked.deadlinePulseActive() {
+		t.Fatal("expected no pulse without tracked repositories")
+	}
+}
+
+func TestStalePulseTickIsIgnored(t *testing.T) {
+	m := repositoriesModel(time.Now())
+	m.pulseActive, m.pulseToken = true, 3
+	updated, _ := m.Update(pulseTickMsg{token: 2})
+	if got := updated.(model); got.pulsePhase {
+		t.Fatal("expected a beat from a retired cue to be dropped")
+	}
+	updated, cmd := m.Update(pulseTickMsg{token: 3})
+	m = updated.(model)
+	if !m.pulsePhase || cmd == nil {
+		t.Fatal("expected the current beat to toggle and re-arm")
+	}
+}
+
+func TestSelectedRowBandSpansTheFullWidth(t *testing.T) {
+	m := repositoriesModel(time.Now())
+	var selected repositoryListRow
+	for _, row := range m.repositoryListRows() {
+		if !row.header {
+			selected = row
+			break
+		}
+	}
+	plain := m.repositoryRowLine(selected, 40, false)
+	banded := m.repositoryRowLine(selected, 40, true)
+	// The band continues behind the padding, so the highlight is a solid strip
+	// rather than a smear that stops after the text.
+	if lipgloss.Width(plain) != 40 || lipgloss.Width(banded) != 40 {
+		t.Fatalf("row widths = %d and %d, want 40", lipgloss.Width(plain), lipgloss.Width(banded))
+	}
+	if len(banded) <= len(plain) {
+		t.Fatalf("expected the selected row to carry extra styling, got %q vs %q", banded, plain)
+	}
+	if strings.Contains(plain, "\x1b[48;") {
+		t.Fatalf("expected an unselected row to have no background, got %q", plain)
+	}
+}
+
+func TestWideLayoutSplitsOnlyWhenThereIsRoom(t *testing.T) {
+	narrow := repositoriesModel(time.Now())
+	narrow.width, narrow.height = 64, 16
+	if narrow.wideLayout() {
+		t.Fatal("expected 64 columns to stay single pane")
+	}
+	if strings.Contains(ansi.Strip(narrow.repositoriesView()), "Path") {
+		t.Fatal("expected no details pane in the narrow layout")
+	}
+
+	wide := repositoriesModel(time.Now())
+	wide.width, wide.height = 140, 30
+	if !wide.wideLayout() {
+		t.Fatal("expected a wide terminal to use the two pane layout")
+	}
+	// The details pane follows the cursor, so it has to describe the selected
+	// repository once the cursor leaves the section headers.
+	wide.cursor = 2
+	view := ansi.Strip(wide.repositoriesView())
+	// The details pane describes the selection without a network or subprocess
+	// call, so it must be readable from model state alone.
+	if !strings.Contains(view, "│") || !strings.Contains(view, "Path") || !strings.Contains(view, "511/alpha") {
+		t.Fatalf("expected the details pane to describe the selection, got:\n%s", view)
+	}
+}
+
+func TestHeaderBreadcrumbNamesTheWeek(t *testing.T) {
+	now := time.Date(2026, time.November, 11, 12, 0, 0, 0, time.UTC)
+	m := repositoriesModel(now)
+	header := ansi.Strip(strings.Join(m.repositoriesHeaderLines(80), "\n"))
+	if !strings.Contains(header, "week of Nov 9") {
+		t.Fatalf("expected the breadcrumb to name the week, got:\n%s", header)
+	}
+	if !strings.Contains(header, "Priority") {
+		t.Fatalf("expected the breadcrumb to name the tracking block, got:\n%s", header)
+	}
+}
+
+func TestShimmerFillsTheProgressTrackWhileLoading(t *testing.T) {
+	m := repositoriesModel(time.Now())
+	m.loadingCommits = true
+	m.commitCounts = map[string]int{}
+	if got, want := lipgloss.Width(ansi.Strip(m.shimmer())), commitProgressWidth; got != want {
+		t.Fatalf("shimmer width = %d, want %d", got, want)
+	}
+	// The known-count bar must be untouched by the loading cue, or the two
+	// states would be indistinguishable at the same count.
+	if got, want := lipgloss.Width(ansi.Strip(m.shimmer())), lipgloss.Width(ansi.Strip(commitProgressBar(0))); got != want {
+		t.Fatalf("shimmer width %d differs from the real track %d", got, want)
+	}
+	for _, row := range m.repositoryListRows() {
+		if row.repository != "alpha" {
+			continue
+		}
+		if line := ansi.Strip(m.repositoryRowLine(row, 60, false)); !strings.Contains(line, "Loading") {
+			t.Fatalf("expected the loading cue on a tracked row, got %q", line)
+		}
 	}
 }

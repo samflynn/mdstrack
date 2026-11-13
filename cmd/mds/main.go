@@ -44,6 +44,77 @@ const (
 	// one is the overflow indicator that reports it, so pinning fewer rows than
 	// the body needs would leave a row with no window to render into.
 	repositoryMinScrollRoom = 2
+
+	// layoutWideMin is the narrowest terminal that gets the two pane layout:
+	// the list on the left, a one cell rule, and a details pane beside it.
+	// Below it the list keeps the whole body width, because a details pane any
+	// narrower than half of this cannot render its labels.
+	layoutWideMin = 120
+
+	// layoutListShare is the list pane's percentage of a wide body. The list
+	// carries the longest strings (repository names plus the right aligned
+	// deadline and progress), so it keeps the larger share.
+	layoutListShare = 55
+
+	// deadlineTrackCells is one cell per day of the week leading to the
+	// deadline, so the track encodes the same span the day count reports.
+	deadlineTrackCells = 7
+)
+
+// deadlinePulseInterval is the half period of the deadline breathing cue. It is
+// deliberately slower than the caret blink: the cue is ambient, and a fast pulse
+// under a deadline reads as an alarm rather than a reminder.
+const deadlinePulseInterval = 900 * time.Millisecond
+
+// celebrateFor is how long a repository's goal celebration stays on its row
+// after its commit count first reaches the target.
+const celebrateFor = 6 * time.Second
+
+// Row state markers. Every state gets its own glyph, so the list stays readable
+// when colour is unavailable: a hollow ring is untracked, a filled ring is
+// tracked, a check means the goal is met, and a star is the one-shot
+// celebration of reaching it.
+const (
+	untrackedMarker   = "○"
+	trackedMarker     = "●"
+	doneMarker        = "✓"
+	celebratingMarker = "★"
+)
+
+// Row-level glyphs. The selection pointer is named because the row renderer
+// subtracts its width when reserving room for it.
+const (
+	rowSelectionGlyph = "▸ "
+	rowFavoriteGlyph  = "★ "
+	rowCollapsed      = "› "
+	rowExpanded       = "⌄ "
+)
+
+// Tree guides. Repositories hang one level below their group, so their guide
+// lives in the root column and closes with an elbow under the final group.
+// Group headers live in the branch column, under the section header above them.
+const (
+	treeIndent      = "  "
+	treeRootTee     = "├─ "
+	treeRootElbow   = "└─ "
+	treeBranchTee   = "│  ├─ "
+	treeBranchElbow = "│  └─ "
+)
+
+// shimmerHead and shimmerTrail draw the indeterminate loading track. The width
+// matches commitProgressWidth so the row does not jump when the real bar
+// replaces it.
+const (
+	shimmerHead  = "█"
+	shimmerTail  = 3
+	shimmerTrail = "░"
+)
+
+// deadlineTrackFill and deadlineTrackEmpty are the two halves of the deadline
+// track. They are deliberately the same cell width so the track never shifts.
+const (
+	deadlineTrackFill  = "▰"
+	deadlineTrackEmpty = "▱"
 )
 
 // chromeStyle frames the whole interface. It carries the gutter and nothing
@@ -63,8 +134,9 @@ const blinkInterval = 530 * time.Millisecond
 const minLegendWidth = 20
 
 // Palette. Every colour is adaptive so the interface keeps a usable contrast
-// ratio on both light and dark terminals, and so NO_COLOR=1 degrades to plain
-// text rather than losing information (state is also carried by glyphs).
+// ratio on both light and dark terminals. No state is carried by colour alone:
+// markers, glyphs, and bar fills restate it, which is what keeps the interface
+// readable under NO_COLOR and for colourblind users.
 var (
 	colorAccent  = lipgloss.AdaptiveColor{Light: "#5B5BD6", Dark: "#A78BFA"}
 	colorBrand   = lipgloss.AdaptiveColor{Light: "#3D3DC7", Dark: "#C4B5FD"}
@@ -74,6 +146,17 @@ var (
 	colorSuccess = lipgloss.AdaptiveColor{Light: "#0F766E", Dark: "#5EEAD4"}
 	colorPending = lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FBBF24"}
 	colorTracked = lipgloss.AdaptiveColor{Light: "#7C3AED", Dark: "#C4B5FD"}
+	// colorInactive dims the groups outside the pinned tracking block so the
+	// eye lands on what is being tracked. It is a real colour rather than the
+	// SGR faint attribute, because faint renders inconsistently across
+	// terminals and is routinely ignored by themes.
+	colorInactive = lipgloss.AdaptiveColor{Light: "#7C7C88", Dark: "#6B7280"}
+	// colorSelection is the selection band behind a row. It is deliberately
+	// low contrast: a row band must read as a highlight without competing with
+	// the coloured progress bar and deadline painted on top of it.
+	colorSelection = lipgloss.AdaptiveColor{Light: "#E7E7F5", Dark: "#2B2B3D"}
+	// colorTrackOff is the unfilled half of the deadline track.
+	colorTrackOff = lipgloss.AdaptiveColor{Light: "#C8C8D2", Dark: "#3A3A4A"}
 )
 
 type config struct {
@@ -122,6 +205,13 @@ type statusExpiryMsg struct {
 	token int
 }
 
+// pulseTickMsg advances the deadline breathing cue. The token identifies the
+// timer generation, so a tick left over from a cue that has since been stopped
+// cannot restart it.
+type pulseTickMsg struct {
+	token int
+}
+
 type workspaceRefreshMsg struct {
 	repositories []string
 	err          error
@@ -158,6 +248,15 @@ type repositoryListRow struct {
 	index      int
 	key        string
 	header     bool
+	// count is how many repositories the header row stands for. Group headers
+	// carry it as a badge so a collapsed group still reports its size.
+	count int
+	// last marks the final child of a group, so the tree guide can close the
+	// branch with an elbow instead of a tee.
+	last bool
+	// rootLast marks the member of the final group in its section, so the
+	// guide above it stays a straight line rather than a branch.
+	rootLast bool
 }
 
 // keyMap describes the repository list bindings once, so the persistent footer
@@ -269,8 +368,23 @@ type model struct {
 	blinkToken int
 	// blinkActive reports whether the caret blink cycle is currently running.
 	blinkActive bool
-	spinner     spinner.Model
-	help        help.Model
+	// pulseToken identifies the deadline pulse timer generation, and
+	// pulsePhase is the half-period the cue is currently showing. Like blink,
+	// the phase lives on the model so View stays pure.
+	pulseToken  int
+	pulseActive bool
+	pulsePhase  bool
+	// shimmerFrame is the offset of the travelling highlight drawn while the
+	// first commit load is in flight. It lives here rather than in View for the
+	// same reason as pulsePhase.
+	shimmerFrame int
+	// celebrating remembers which repositories were already seen at or above
+	// the goal, so the one-shot cue fires on attainment rather than on every
+	// render, and celebratedUntil says how long each cue still has to run.
+	celebrating     map[string]bool
+	celebratedUntil map[string]time.Time
+	spinner         spinner.Model
+	help            help.Model
 
 	// Search, clone-folder, and title text entry share one implementation
 	// (textValue) so editing, unicode handling, and horizontal scrolling all
@@ -287,16 +401,25 @@ type model struct {
 }
 
 var (
-	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(colorBrand)
-	accentStyle   = lipgloss.NewStyle().Foreground(colorAccent)
-	mutedStyle    = lipgloss.NewStyle().Foreground(colorMuted)
-	subtleStyle   = lipgloss.NewStyle().Foreground(colorSubtle)
-	errorStyle    = lipgloss.NewStyle().Foreground(colorDanger)
-	promptStyle   = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	selectedStyle = lipgloss.NewStyle().Foreground(colorAccent)
-	groupStyle    = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
-	favoriteStyle = lipgloss.NewStyle().Foreground(colorTracked).Italic(true).Bold(true)
-	cursorStyle   = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	titleStyle       = lipgloss.NewStyle().Bold(true).Foreground(colorBrand)
+	accentStyle      = lipgloss.NewStyle().Foreground(colorAccent)
+	mutedStyle       = lipgloss.NewStyle().Foreground(colorMuted)
+	subtleStyle      = lipgloss.NewStyle().Foreground(colorSubtle)
+	errorStyle       = lipgloss.NewStyle().Foreground(colorDanger)
+	promptStyle      = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	selectedStyle    = lipgloss.NewStyle().Foreground(colorAccent)
+	groupStyle       = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
+	favoriteStyle    = lipgloss.NewStyle().Foreground(colorTracked).Italic(true).Bold(true)
+	cursorStyle      = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	inactiveStyle    = lipgloss.NewStyle().Foreground(colorInactive)
+	inactiveItalic   = lipgloss.NewStyle().Foreground(colorInactive).Italic(true)
+	celebratingStyle = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
+	selectionBand    = lipgloss.NewStyle().Background(colorSelection)
+	// noBand is the explicit absence of a background. lipgloss renders an
+	// unset background and a NoColor background identically (no escape codes at
+	// all), but naming it keeps the segmented row renderer's two branches
+	// symmetric and readable.
+	noBand = lipgloss.NewStyle().Background(lipgloss.NoColor{})
 )
 
 // commitBarStyle renders the fixed-width commit bar. Bubbles' progress component
@@ -457,7 +580,7 @@ func newModel() (model, error) {
 	now := time.Now()
 	refreshInterval := configuredRefreshInterval(stored.RefreshIntervalMinutes)
 	m := model{
-		mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), deadlineOverride: stored.DeadlineOverride, refreshIntervalMinutes: refreshInterval, lastRefresh: now, nextRefresh: now.Add(time.Duration(refreshInterval) * time.Minute), now: now, repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, groupTitles: stored.GroupTitles, err: err,
+		mode: repositoriesMode, path: stored.MDSFolder, githubUsername: stored.GitHubUsername, githubProfileName: stored.GitHubProfileName, githubHost: configuredGitHubHost(stored.GitHubHost), deadlineOverride: stored.DeadlineOverride, refreshIntervalMinutes: refreshInterval, lastRefresh: now, nextRefresh: now.Add(time.Duration(refreshInterval) * time.Minute), now: now, repositories: repositories, favorites: stored.Favorites, commitCounts: make(map[string]int), commitErrors: make(map[string]error), loadingCommits: hasTrackedRepositories(stored.Favorites), celebrating: make(map[string]bool), celebratedUntil: make(map[string]time.Time), collapsed: stored.Collapsed, favoritesTitle: stored.FavoritesTitle, groupTitles: stored.GroupTitles, err: err,
 	}
 	m.spinner, m.help = newModelSpinner(), newModelHelp()
 	m.localSearchInput = newTextValue("/ ")
@@ -515,6 +638,66 @@ func nextBlink(token int) tea.Cmd {
 	return tea.Tick(blinkInterval, func(time.Time) tea.Msg {
 		return blinkMsg{token: token}
 	})
+}
+
+// nextPulse schedules the next beat of the deadline cue.
+func nextPulse(token int) tea.Cmd {
+	return tea.Tick(deadlinePulseInterval, func(time.Time) tea.Msg {
+		return pulseTickMsg{token: token}
+	})
+}
+
+// synchronizePulse runs the deadline cue only while a tracked deadline is close
+// enough to be worth the motion: inside the final day. Everywhere else the
+// timer stays stopped, so the ambient animation budget is spent where it
+// carries information rather than ticking for the life of the session.
+func (m *model) synchronizePulse(cmd tea.Cmd) tea.Cmd {
+	active := m.deadlinePulseActive()
+	switch {
+	case active && !m.pulseActive:
+		m.pulseActive = true
+		m.pulseToken++
+		return tea.Batch(cmd, nextPulse(m.pulseToken))
+	case !active && m.pulseActive:
+		m.pulseActive = false
+		m.pulsePhase = false
+		// Bumping the token retires any beat already in flight.
+		m.pulseToken++
+	}
+	return cmd
+}
+
+// isCelebrating reports whether a repository's goal cue is still running. The
+// expiry is checked against the clock rather than enforced by a timer, so View
+// stays a pure function and the cue still ends on time even when no message
+// arrives to clear it.
+func (m model) isCelebrating(repository string) bool {
+	return m.celebrating[repository] && m.clock().Before(m.celebratedUntil[repository])
+}
+
+// startCelebration marks a repository as freshly at goal. Bumping the status
+// token re-arms the expiry timer that clears the celebration, reusing the same
+// transient-message lifecycle the footer already relies on.
+func (m *model) startCelebration(repository string) {
+	if m.celebrating == nil {
+		m.celebrating = make(map[string]bool)
+	}
+	if m.celebratedUntil == nil {
+		m.celebratedUntil = make(map[string]time.Time)
+	}
+	m.celebrating[repository] = true
+	m.celebratedUntil[repository] = m.clock().Add(celebrateFor)
+	m.actionStatus = "Goal reached · " + repository + " · " + fmt.Sprintf("%d commits this week", commitGoal)
+}
+
+// deadlinePulseActive reports whether the last day of the week is in progress.
+func (m model) deadlinePulseActive() bool {
+	if !hasTrackedRepositories(m.favorites) {
+		return false
+	}
+	now := m.clock()
+	days := deadlineDaysLeft(m.effectiveDeadline(now), now)
+	return days >= 0 && days <= 1
 }
 
 // synchronizeBlink starts and stops the caret blink cycle to match whether a
@@ -579,20 +762,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return updated, cmd
 	}
+	// The mutating helpers run before synchronizeScroll, and each result is
+	// assigned to cmd rather than inlined into the return statement: Go
+	// evaluates the left-most call first, so an inlined mutator would be
+	// reading a copy of next taken before the other helpers ran.
 	if _, resized := msg.(tea.WindowSizeMsg); resized {
 		// A resize changes how many rows fit, so the pinned block and the
 		// window underneath it both have to be measured again.
 		cmd = next.synchronizeBlink(cmd)
+		cmd = next.synchronizePulse(cmd)
 		return next.synchronizeScroll(), cmd
 	}
 	newStatus := (next.actionStatus != "" && next.actionStatus != m.actionStatus) ||
 		(next.cloneStatus != "" && next.cloneStatus != m.cloneStatus)
 	if !newStatus {
 		cmd = next.synchronizeBlink(cmd)
+		cmd = next.synchronizePulse(cmd)
 		return next.synchronizeScroll(), cmd
 	}
 	next.statusToken++
 	cmd = next.synchronizeBlink(tea.Batch(cmd, nextStatusExpiry(next.statusToken)))
+	cmd = next.synchronizePulse(cmd)
 	return next.synchronizeScroll(), cmd
 }
 
@@ -604,6 +794,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		if m.loadingCommits {
+			// The spinner already ticks while a lookup is in flight, so its
+			// cadence drives the loading shimmer too instead of arming a
+			// second timer for the same frames.
+			m.shimmerFrame++
 			return m, cmd
 		}
 		return m, nil
@@ -613,7 +807,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.actionStatus, m.cloneStatus = "", ""
+		// The celebration is not cleared here: it runs on its own clock, which
+		// isCelebrating enforces, so it outlives the footer message that
+		// announced it instead of being cut off with it.
 		return m, nil
+	case pulseTickMsg:
+		// A beat from a cue that has since stopped must not restart it.
+		if msg.token != m.pulseToken {
+			return m, nil
+		}
+		m.pulsePhase = !m.pulsePhase
+		return m, nextPulse(m.pulseToken)
 	case blinkMsg:
 		// Only the newest blink cycle may toggle the caret; ticks left over
 		// from a closed editor are stale and get dropped.
@@ -628,8 +832,19 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, repository := range msg.repositories {
 			delete(m.commitCounts, repository)
 			delete(m.commitErrors, repository)
+			delete(m.celebrating, repository)
 		}
 		for repository, count := range msg.counts {
+			// The celebration is one shot per attainment: it starts when a
+			// tracked count first reaches the goal, and celebratingUntil is
+			// what stops a later re-render from starting it again.
+			if _, known := m.commitCounts[repository]; known {
+				if count >= commitGoal && m.commitCounts[repository] < commitGoal && m.favorites[repository] {
+					m.startCelebration(repository)
+				}
+			} else if count >= commitGoal && m.favorites[repository] {
+				m.startCelebration(repository)
+			}
 			m.commitCounts[repository] = count
 		}
 		for repository, err := range msg.errors {
@@ -1396,12 +1611,38 @@ func (m model) repositoriesHeader() []string {
 }
 
 // repositoriesHeaderLines takes its width so headerHeight can measure the row
-// count without recursing back through layoutMetrics.
+// count without recursing back through layoutMetrics. The row count is load
+// bearing: headerHeight() derives the body height from it, so the breadcrumb
+// and the week label share the second row rather than adding a third.
 func (m model) repositoriesHeaderLines(width int) []string {
 	return []string{
 		titleStyle.Render("mds") + "  " + mutedStyle.Render("UBC MDS repositories"),
-		mutedStyle.Render(truncate(m.path, width)),
+		mutedStyle.Render(truncate(m.headerBreadcrumb(), width)),
 	}
+}
+
+// headerBreadcrumb names where the list is pointing and which week it is
+// counting towards, so the header answers "what am I looking at" without a
+// second glance at the footer.
+func (m model) headerBreadcrumb() string {
+	parts := []string{}
+	if title := strings.TrimSpace(m.favoritesTitle); title != "" {
+		parts = append(parts, title)
+	} else {
+		parts = append(parts, filepath.Base(filepath.Clean(m.path)))
+	}
+	parts = append(parts, m.weekLabel(m.effectiveDeadline(m.clock())))
+	return strings.Join(parts, " · ")
+}
+
+// weekLabel names the deadline week as the Monday it starts on, which is how a
+// course week is scheduled even though the deadline itself is a Saturday.
+func (m model) weekLabel(deadline time.Time) string {
+	monday := time.Date(deadline.Year(), deadline.Month(), deadline.Day(), 0, 0, 0, 0, deadline.Location())
+	for monday.Weekday() != time.Monday {
+		monday = monday.AddDate(0, 0, -1)
+	}
+	return "week of " + monday.Format("Jan 2")
 }
 
 // searchHeader is the two line search header.
@@ -1430,14 +1671,158 @@ func (m model) repositoriesView() string {
 		body = append(body, errorStyle.Render(truncate("Unable to scan repositories: "+m.err.Error(), width)))
 	} else if len(m.repositories) == 0 {
 		body = append(body, mutedStyle.Render("No Git repositories found in this folder."))
-	} else if rows := m.repositoryRowsView(width); len(rows) > 0 {
-		body = append(body, rows...)
+	} else {
+		body = append(body, m.repositoriesBodyView(width)...)
 	}
-	body = append(body, m.editorOverlayRowsView(width)...)
 	if repository, err := m.firstCommitError(); err != nil {
 		body = append(body, blankLine, errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
 	return m.fullScreen(header, body, []string{mutedStyle.Render(truncate(m.repositoryFooter(width), width))})
+}
+
+// repositoriesBodyView is the list body, split into two panes when the terminal
+// is wide enough to give the selected repository a details column of its own.
+func (m model) repositoriesBodyView(width int) []string {
+	if m.wideLayout() {
+		return m.twoPaneBodyView(width)
+	}
+	body := m.repositoryRowsView(width)
+	body = append(body, m.editorOverlayRowsView(width)...)
+	return body
+}
+
+// wideLayout reports whether the body is wide enough for the details pane. The
+// threshold is a property of the terminal, not of the model, so it is measured
+// from the same content width the panes are then sized with.
+func (m model) wideLayout() bool {
+	return m.contentWidth() >= layoutWideMin
+}
+
+// twoPaneBodyView draws the list on the left, a one cell rule in the middle, and
+// the selected repository's details on the right. The panes are joined row by
+// row rather than as two blocks: block() sizes its argument as one terminal row
+// per element, so a pre-joined pane string would be measured as a single line.
+func (m model) twoPaneBodyView(width int) []string {
+	listWidth := max(1, width*layoutListShare/100)
+	// The rule is flanked by a space on each side, so the two columns of text
+	// never touch the divider.
+	detailsWidth := max(1, width-listWidth-3)
+	list := m.repositoryRowsView(listWidth)
+	list = append(list, m.editorOverlayRowsView(listWidth)...)
+	details := m.detailsPaneLines(detailsWidth)
+
+	bodyHeight := m.contentHeight()
+	lines := make([]string, 0, bodyHeight)
+	for row := 0; row < bodyHeight; row++ {
+		lines = append(lines, paneLine(list, row, listWidth)+" "+mutedStyle.Render("│")+" "+paneLine(details, row, detailsWidth))
+	}
+	return lines
+}
+
+// paneLine pads one pane row to exactly width cells, so the two panes and the
+// rule between them line up at every row.
+func paneLine(lines []string, row, width int) string {
+	line := ""
+	if row < len(lines) {
+		line = truncate(lines[row], width)
+	}
+	return line + strings.Repeat(" ", max(0, width-lipgloss.Width(line)))
+}
+
+// pluralRepositories writes a repository count without the "1 repositories"
+// mismatch that reads like a bug in an otherwise careful interface.
+func pluralRepositories(count int) string {
+	if count == 1 {
+		return "1 repository"
+	}
+	return fmt.Sprintf("%d repositories", count)
+}
+
+// groupDetailsLines summarises a group header, so the details pane still says
+// something useful while the cursor sits on a heading.
+func (m model) groupDetailsLines(row repositoryListRow, width int) []string {
+	state := "collapsed"
+	if !m.collapsed[row.key] {
+		state = "expanded"
+	}
+	tracked := 0
+	if row.key == "favorites" {
+		tracked = row.count
+	}
+	lines := []string{
+		titleStyle.Render(truncate(strings.ToUpper(row.group), width)),
+		mutedStyle.Render(truncate(fmt.Sprintf("%s · %s", pluralRepositories(row.count), state), width)),
+	}
+	if row.key == "favorites" {
+		lines = append(lines,
+			blankLine,
+			mutedStyle.Render(truncate("Tracking block", width)),
+			subtleStyle.Render(truncate(fmt.Sprintf("  %s counted towards %d", pluralRepositories(tracked), commitGoal), width)),
+			blankLine,
+			subtleStyle.Render(truncate("  Enter collapses or expands the block", width)),
+		)
+		return lines
+	}
+	lines = append(lines,
+		blankLine,
+		mutedStyle.Render(truncate("Group", width)),
+		subtleStyle.Render(truncate("  "+m.groupDisplayTitle(row.rawGroup), width)),
+		blankLine,
+		subtleStyle.Render(truncate("  e renames it · Enter collapses it", width)),
+	)
+	return lines
+}
+
+// detailsPaneLines describes the selected repository using only state the model
+// already holds. It deliberately performs no GitHub lookup: View has to stay
+// pure, and a subprocess in the render path would stall every frame.
+func (m model) detailsPaneLines(width int) []string {
+	rows := m.repositoryListRows()
+	if m.cursor >= 0 && m.cursor < len(rows) && rows[m.cursor].header {
+		return m.groupDetailsLines(rows[m.cursor], width)
+	}
+	repository, ok := m.selectedRepository(rows)
+	if !ok {
+		return []string{mutedStyle.Render(truncate("Select a repository", width))}
+	}
+	group, name := repositoryGroup(repository)
+	tracked := m.favorites[repository]
+
+	lines := []string{
+		titleStyle.Render(truncate(name, width)),
+		mutedStyle.Render(truncate("in "+m.groupDisplayTitle(group), width)),
+		blankLine,
+		mutedStyle.Render(truncate("Path  ", width)),
+		subtleStyle.Render(truncate("  "+filepath.ToSlash(repository), width)),
+		blankLine,
+	}
+	if !tracked {
+		lines = append(lines,
+			mutedStyle.Render(truncate("Not tracked", width)),
+			subtleStyle.Render(truncate("  Enter adds it to the tracking block", width)),
+		)
+		return lines
+	}
+
+	deadline := m.effectiveDeadline(m.clock())
+	count, counted := m.commitCounts[repository]
+	lines = append(lines, mutedStyle.Render(truncate("Tracked", width)))
+	switch {
+	case m.commitErrors[repository] != nil:
+		lines = append(lines, errorStyle.Render(truncate("  gh error: "+m.commitErrors[repository].Error(), width)))
+	case m.loadingCommits && count == 0:
+		lines = append(lines, subtleStyle.Render(truncate("  "+m.spinner.View()+" Loading", width)))
+	case counted:
+		lines = append(lines, truncate("  "+commitProgress(count), width))
+	default:
+		lines = append(lines, subtleStyle.Render(truncate("  awaiting first sync", width)))
+	}
+	lines = append(lines,
+		blankLine,
+		mutedStyle.Render(truncate("Deadline", width)),
+		truncate("  "+m.deadlineLine(deadline, m.clock()), width),
+	)
+	return lines
 }
 
 // repositoryRowsView renders the repository list. The tracked (favourite)
@@ -1516,31 +1901,80 @@ func (m model) scrollWindow(rows []repositoryListRow, cursor, budget int) (int, 
 	return start, end, start > 0 || end < count
 }
 
-// repositoryRowLine renders one list row at the given indent.
+// repositoryRowLine renders one list row. Rows carry their own tree position so
+// the list reads as a hierarchy rather than a flat indentation, and groups
+// outside the tracking block are dimmed so the eye lands on what is tracked.
 func (m model) repositoryRowLine(row repositoryListRow, width int, selected bool) string {
 	if row.key == "divider" {
 		return mutedStyle.Render(strings.Repeat("─", width))
 	}
+	band := m.rowBand(selected)
+	// treeRoot and treeBranch are the two guide columns: rows in the final group
+	// of a section hang off the root, everything else hangs off a branch, so the
+	// guides never point at a row that does not exist.
 	indent := ""
-	if strings.HasPrefix(row.key, "favorite:") {
-		indent = "  "
+	switch {
+	case row.key == "favorites":
+		indent = treeIndent
+	case !row.header && strings.HasPrefix(row.key, "favorite:"):
+		indent = treeBranchTee
+		if row.last {
+			indent = treeBranchElbow
+		}
+	case !row.header:
+		indent = treeRootElbow
+		if !row.rootLast {
+			indent = treeRootTee
+		}
+	case strings.HasPrefix(row.key, "favorite:"), strings.HasPrefix(row.key, "group:"):
+		indent = treeBranchTee
+		if row.last {
+			indent = treeBranchElbow
+		}
 	}
 	if row.header {
 		prefix := "⌄ "
 		if m.collapsed[row.key] {
 			prefix = "› "
 		}
-		label := indent + prefix + truncate(strings.ToUpper(row.group), width-len(indent)-3)
+		label := indent + prefix + strings.ToUpper(row.group)
+		// A one member group is already obvious from the single row beneath it,
+		// so the badge only appears when it says something you cannot just see.
+		if row.count > 1 {
+			label += fmt.Sprintf(" (%d)", row.count)
+		}
+		label = truncate(label, width-len(rowSelectionGlyph))
+		lead := ""
+		body := label
+		style := groupStyle
 		switch {
 		case selected:
-			return cursorStyle.Render("▸ " + label)
+			lead, style = rowSelectionGlyph, cursorStyle
 		case row.key == "favorites":
-			return favoriteStyle.Render("★ " + label)
+			lead, style = rowFavoriteGlyph, favoriteStyle
+		case strings.HasPrefix(row.key, "favorite:"):
 		default:
-			return groupStyle.Render(label)
+			style = inactiveItalic
 		}
+		return lead + style.Inherit(band).Render(body) + m.rowBandPadding(lead+body, width, band)
 	}
-	return m.repositoryRowView(row, width, selected, indent)
+	return m.repositoryRowView(row, width, selected, indent, band)
+}
+
+// rowBand is the background behind the selected row. Every segment of a row
+// has to carry it individually, because an inner style's reset sequence ends an
+// outer background; wrapping a finished line would leave the band broken.
+func (m model) rowBand(selected bool) lipgloss.Style {
+	if selected {
+		return selectionBand
+	}
+	return noBand
+}
+
+// rowBandPadding extends the selection band to the full row width so the
+// highlight is a solid band rather than a smear behind the text.
+func (m model) rowBandPadding(rowText string, width int, band lipgloss.Style) string {
+	return band.Render(strings.Repeat(" ", max(0, width-lipgloss.Width(rowText))))
 }
 
 // synchronizeScroll re-anchors the scroll window after an event that can move
@@ -1559,24 +1993,34 @@ func (m model) synchronizeScroll() model {
 	return m
 }
 
-// repositoryRowView renders one repository line: the tracking marker and name
-// on the left, the deadline and commit progress right-aligned.
-func (m model) repositoryRowView(row repositoryListRow, width int, selected bool, indent string) string {
+// repositoryRowView renders one repository line: the state marker and name on
+// the left, the deadline and commit progress right-aligned.
+func (m model) repositoryRowView(row repositoryListRow, width int, selected bool, indent string, band lipgloss.Style) string {
 	repository := m.repositories[row.index]
-	marker := "[ ]"
-	if m.favorites[repository] {
-		marker = "[X]"
+	tracked := m.favorites[repository]
+
+	marker, markerStyle := untrackedMarker, inactiveStyle
+	if tracked {
+		switch {
+		case m.isCelebrating(repository):
+			marker, markerStyle = celebratingMarker, celebratingStyle
+		case m.commitCounts[repository] >= commitGoal:
+			marker, markerStyle = doneMarker, lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
+		default:
+			marker, markerStyle = trackedMarker, lipgloss.NewStyle().Foreground(colorTracked)
+		}
 	}
 
 	countText, deadlineText := "", ""
-	nameStyle := lipgloss.NewStyle()
-	if m.favorites[repository] {
-		deadlineText = deadlineStatus(m.effectiveDeadline(m.clock()), m.clock())
+	nameStyle := inactiveStyle
+	if tracked {
+		nameStyle = noBand
+		deadlineText = m.deadlineLine(m.effectiveDeadline(m.clock()), m.clock())
 		switch {
 		case m.commitErrors[repository] != nil:
 			countText, nameStyle = "GH ERROR", errorStyle
 		case m.loadingCommits && m.commitCounts[repository] == 0:
-			countText = m.spinner.View() + " Loading"
+			countText = m.shimmer() + " Loading"
 		default:
 			if count, ok := m.commitCounts[repository]; ok {
 				countText, nameStyle = commitProgress(count), commitProgressStyle(count)
@@ -1584,28 +2028,68 @@ func (m model) repositoryRowView(row repositoryListRow, width int, selected bool
 		}
 	}
 
-	prefix := indent + marker + " "
+	lead := indent
 	if selected {
-		prefix = "▸ " + prefix
+		lead = rowSelectionGlyph + lead
 	}
+	// The right hand column is built first, because it decides how much room
+	// the name gets. When both do not fit, the calendar phrase wins: "3 days
+	// left" changes what you do tonight, "2/3" does not.
 	rightText := deadlineText
 	if countText != "" {
-		if rightText != "" {
-			rightText += "  "
+		if rightText == "" {
+			rightText = countText
+		} else if width >= lipgloss.Width(lead)+lipgloss.Width(untrackedMarker)+1+lipgloss.Width(rightText)+lipgloss.Width(countText)+4 {
+			rightText += "  " + countText
 		}
-		rightText += countText
 	}
+	prefix := lead + marker + " "
 	available := width - lipgloss.Width(prefix) - lipgloss.Width(rightText)
 	name := truncate(row.repository, max(1, available-1))
-	prefixText := selectedStyle.Render(prefix)
+
+	prefixText := selectedStyle
 	if selected {
-		prefixText = cursorStyle.Render(prefix)
+		prefixText = cursorStyle
 	}
-	rowText := prefixText + nameStyle.Render(name)
+	rendered := prefixText.Inherit(band).Render(lead) +
+		markerStyle.Inherit(band).Render(marker) +
+		selectedStyle.Inherit(band).Render(" ") +
+		nameStyle.Inherit(band).Render(name)
 	if rightText != "" {
-		rowText += strings.Repeat(" ", max(1, width-lipgloss.Width(rowText)-lipgloss.Width(rightText))) + rightText
+		gap := max(1, width-lipgloss.Width(rendered)-lipgloss.Width(rightText))
+		rendered += band.Render(strings.Repeat(" ", gap)) + nameStyle.Inherit(band).Render(rightText)
 	}
-	return rowText
+	return rendered + m.rowBandPadding(rendered, width, band)
+}
+
+// shimmer is the indeterminate progress cue shown while a count is in flight.
+// It sweeps a highlight along the empty track rather than showing a partially
+// filled bar, because nothing is known about the count yet and a half-full bar
+// would claim knowledge the model does not have.
+func (m model) shimmer() string {
+	width := commitProgressWidth
+	head := 0
+	if width > 0 {
+		head = m.shimmerFrame % width
+	}
+	cells := make([]string, 0, width)
+	for index := 0; index < width; index++ {
+		distance := index - head
+		if distance < 0 {
+			distance += width
+		}
+		switch {
+		case distance == 0:
+			cells = append(cells, accentStyle.Bold(true).Render(shimmerHead))
+		case distance < shimmerTail:
+			cells = append(cells, accentStyle.Render(shimmerHead))
+		default:
+			cells = append(cells, subtleStyle.Render(shimmerTrail))
+		}
+	}
+	// The width is fixed so the row does not jump when the real bar replaces
+	// the cue.
+	return strings.Join(cells, "")
 }
 
 // repositoryFooter prefers the most specific active mode, and only falls back to
@@ -1732,7 +2216,7 @@ func (m model) repositoryListRows() []repositoryListRow {
 	}
 	rows := []repositoryListRow{}
 	if len(favorites) > 0 {
-		rows = append(rows, repositoryListRow{group: m.favoritesDisplayTitle(), key: "favorites", header: true})
+		rows = append(rows, repositoryListRow{group: m.favoritesDisplayTitle(), key: "favorites", header: true, count: len(favorites)})
 		if !m.collapsed["favorites"] {
 			rows = appendGroupedRepositoryRows(rows, m.repositories, favorites, "favorite:", m.collapsed, m.groupTitles)
 		}
@@ -1744,8 +2228,26 @@ func (m model) repositoryListRows() []repositoryListRow {
 }
 
 func appendGroupedRepositoryRows(rows []repositoryListRow, repositories []string, indexes []int, prefix string, collapsed map[string]bool, groupTitles map[string]string) []repositoryListRow {
+	// Each header is emitted at the moment its group is first reached, so the
+	// group's size and its final member both have to be known up front. One
+	// pass over the indexes collects them; the emission loop then just reads.
+	members := make(map[string]int, len(indexes))
+	finalPosition := make(map[string]int, len(indexes))
+	groupOrder := make([]string, 0, len(indexes))
+	for position, index := range indexes {
+		group, _ := repositoryGroup(repositories[index])
+		if members[group] == 0 {
+			groupOrder = append(groupOrder, group)
+		}
+		members[group]++
+		finalPosition[group] = position
+	}
+	finalGroup := ""
+	if len(groupOrder) > 0 {
+		finalGroup = groupOrder[len(groupOrder)-1]
+	}
 	previousGroup := ""
-	for _, index := range indexes {
+	for position, index := range indexes {
 		group, name := repositoryGroup(repositories[index])
 		key := prefix + group
 		if group != previousGroup {
@@ -1753,14 +2255,27 @@ func appendGroupedRepositoryRows(rows []repositoryListRow, repositories []string
 			if title := strings.TrimSpace(groupTitles[group]); title != "" {
 				displayGroup = title
 			}
-			rows = append(rows, repositoryListRow{group: displayGroup, rawGroup: group, key: key, header: true})
+			rows = append(rows, repositoryListRow{
+				group: displayGroup, rawGroup: group, key: key, header: true,
+				count: members[group], last: group == finalGroup,
+			})
 			previousGroup = group
 		}
 		if !collapsed[key] {
-			rows = append(rows, repositoryListRow{repository: name, index: index, key: prefix + "repository"})
+			rows = append(rows, repositoryListRow{
+				repository: name, index: index, key: prefix + "repository",
+				last: finalPosition[group] == position, rootLast: rowLastGroup(group, finalGroup),
+			})
 		}
 	}
 	return rows
+}
+
+// rowLastGroup reports whether the child's group is the final group of the
+// section. Repositories live at most one level below a group, so the guide
+// above them is straight when their group is last and a tee otherwise.
+func rowLastGroup(group, finalGroup string) bool {
+	return group == finalGroup
 }
 
 func (m model) moveCursor(rows []repositoryListRow, direction int) int {
@@ -2037,6 +2552,49 @@ func deadlineStatus(deadline, now time.Time) string {
 	default:
 		return errorStyle.Render(fmt.Sprintf("%d days overdue", -days))
 	}
+}
+
+// deadlineDaysLeft is the whole-calendar-day distance to the deadline, floored
+// to midnight the same way deadlineStatus does so the two never disagree.
+func deadlineDaysLeft(deadline, now time.Time) int {
+	deadlineDay := time.Date(deadline.Year(), deadline.Month(), deadline.Day(), 0, 0, 0, 0, deadline.Location())
+	nowDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return int(deadlineDay.Sub(nowDay).Hours() / 24)
+}
+
+// deadlineLine is the calendar phrase followed by a one week track. The phrase
+// is the precise part; the track is the part you can read at a glance, and it
+// keeps its shape when colour is unavailable because fill and empty are
+// different glyphs.
+func (m model) deadlineLine(deadline, now time.Time) string {
+	days := deadlineDaysLeft(deadline, now)
+	filled := min(max(deadlineTrackCells-days, 0), deadlineTrackCells)
+	if days < 0 {
+		// Past the deadline the week is spent, so the track empties instead of
+		// staying full: a full track next to "2 days overdue" reads as progress.
+		filled = 0
+	}
+	fillStyle, emptyStyle := promptStyle, lipgloss.NewStyle().Foreground(colorTrackOff)
+	if days < 0 {
+		fillStyle = errorStyle
+	}
+	remaining := deadlineTrackCells - filled
+	// Inside the last day the leading filled cell alternates between bold and
+	// plain, which reads as breathing. It is a weight change rather than a
+	// colour or a glyph change, so it survives NO_COLOR and never alters the
+	// track's geometry or width.
+	lead := fillStyle
+	if days >= 0 && days <= 1 && m.pulsePhase {
+		lead = fillStyle.Bold(true)
+	}
+	body := filled
+	if body > 0 {
+		body--
+	}
+	track := lead.Render(strings.Repeat(deadlineTrackFill, min(1, filled))) +
+		fillStyle.Render(strings.Repeat(deadlineTrackFill, body)) +
+		emptyStyle.Render(strings.Repeat(deadlineTrackEmpty, remaining))
+	return deadlineStatus(deadline, now) + " " + track
 }
 
 // commitProgressRatio maps a commit count onto 0..1 for the bar. The goal is a
