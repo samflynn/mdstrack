@@ -30,6 +30,16 @@ With a repository row selected, press `o` to open the application menu: `v` for 
 
 Press `/` for the search chooser. Press `l` to filter the local workspace list in place; Tracking, editor, and GitHub actions continue to work on those results. Press `g` to open the GitHub repository search page. It loads every repository the authenticated `gh` account can access on the configured host; type to filter the list, use the arrow keys to navigate, and press Esc to return to the local repository list. Press `h` to hide repositories already cloned in the configured workspace, matched by their GitHub origin URL; press it again to show them. With a search result selected, press Enter, then `y` to clone directly into the workspace, or `f` to name a new folder and clone inside it. A folder clone uses `<workspace>/<new-folder>/<repository>`. Press `n` or Esc to cancel; existing destination folders are never overwritten.
 
-Press `?` for the keyboard-shortcuts overlay. `mds` respects `NO_COLOR`, so `NO_COLOR=1 mds` retains all text and state markers while suppressing ANSI colors.
+Press `?` for the keyboard-shortcuts overlay; Esc closes it. The overlay is capped to the terminal height and the list keeps rendering exactly the terminal's row count at every size.
+
+## Interface
+
+The layout is borderless: a title line, the workspace path, one accent rule, the body, and a persistent footer. Every screen renders exactly the terminal's row and column count, so nothing is clipped or wrapped at any size, and long repository names, paths, and inputs are truncated to the available cells — measured in terminal cells rather than bytes, so CJK and emoji names stay aligned.
+
+The footer carries the key legend on the left and the refresh countdown on the right, and it is replaced while a prompt is open or a status message is showing. Legend entries are `↑/↓` move, `Enter` track, `/` search, `o` open, `g` GitHub, and `?` help.
+
+Transient status messages, such as a failed action or a completed clone, clear themselves after a few seconds, so the footer always returns to the legend. A newer message replaces an older one without the older message's timer clearing it early.
+
+`mds` respects `NO_COLOR`, so `NO_COLOR=1 mds` retains all text and state markers while suppressing ANSI colors. The commit bar is drawn with block glyphs, so its magnitude stays readable without color.
 
 Select any Tracking or repository-group header and press `e` to rename it. Group names are saved per folder name and are applied consistently in both Tracking and the main repository list. Clear a group-name input and press Enter to restore its folder name.

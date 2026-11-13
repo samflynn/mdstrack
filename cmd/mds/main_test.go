@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestSetupAcceptsPastedPath(t *testing.T) {
@@ -242,16 +243,62 @@ func TestHelpOverlayIsHeightCappedAndDismissible(t *testing.T) {
 	}
 }
 
-func TestRepositoryViewFitsCommonTerminalSizes(t *testing.T) {
-	for _, size := range []struct{ width, height int }{{60, 16}, {80, 20}, {120, 40}} {
-		m := model{mode: repositoriesMode, width: size.width, height: size.height, repositories: []string{"511/a-very-long-repository-name-that-must-truncate-safely", "511/lab-two", "521/lab-three"}, favorites: map[string]bool{"511/lab-two": true}, commitCounts: map[string]int{"511/lab-two": 2}, collapsed: map[string]bool{}, lastRefresh: time.Now(), nextRefresh: time.Now().Add(5 * time.Minute)}
-		view := m.repositoriesView()
-		if got := lipgloss.Height(view); got != size.height {
-			t.Errorf("%dx%d view height = %d, want %d", size.width, size.height, got, size.height)
+// TestEveryScreenFitsTheTerminal pins the layout contract: whatever the state
+// or the size, a screen renders exactly the terminal's row count and never
+// exceeds its column count. This is what stops a long name, an extra status
+// line, or a taller header from silently pushing the footer off screen.
+func TestEveryScreenFitsTheTerminal(t *testing.T) {
+	sizes := []struct{ width, height int }{{24, 6}, {30, 8}, {40, 10}, {60, 16}, {80, 20}, {120, 40}, {200, 60}}
+	base := func() model {
+		return model{
+			mode: repositoriesMode, path: "/tmp/mds", githubUsername: "u", githubProfileName: "n", githubHost: "github.com",
+			repositories: []string{"511/lab-one", "511/a-very-long-repository-name-that-must-truncate-safely", "521/lab-three", "521/lab-four"},
+			favorites:    map[string]bool{"511/lab-one": true, "521/lab-three": true, "521/lab-four": true},
+			commitCounts: map[string]int{"511/lab-one": 3, "521/lab-three": 1},
+			commitErrors: map[string]error{"521/lab-four": errors.New("boom")},
+			collapsed:    map[string]bool{}, groupTitles: map[string]string{"511": "DSCI 511"},
 		}
-		for _, line := range strings.Split(view, "\n") {
-			if got := lipgloss.Width(line); got > size.width {
-				t.Errorf("%dx%d line width = %d, exceeds %d: %q", size.width, size.height, got, size.width, line)
+	}
+	states := map[string]func() model{
+		"repositories":   base,
+		"local search":   func() model { m := base(); m.localSearchActive, m.localSearch = true, "lab"; return m },
+		"search chooser": func() model { m := base(); m.searchChooser = true; return m },
+		"editor actions": func() model { m := base(); m.editorActions = true; return m },
+		"github actions": func() model { m := base(); m.githubActions = true; return m },
+		"status":         func() model { m := base(); m.actionStatus = "Copied GitHub URL"; return m },
+		"renaming":       func() model { m := base(); m.editingTitle, m.titleInput = true, "My Group"; return m },
+		"settings": func() model {
+			m := base()
+			m.mode, m.editingSetting, m.settingInput = settingsMode, "profile-name", "Shrey Mudgal"
+			return m
+		},
+		"setup":          func() model { m := base(); m.mode, m.setupStep = setupMode, 2; return m },
+		"search":         func() model { m := base(); m.mode, m.githubSearch = searchMode, "abc"; return m },
+		"search loading": func() model { m := base(); m.mode, m.searchLoading = searchMode, true; return m },
+		"search error":   func() model { m := base(); m.mode, m.searchError = searchMode, errors.New("boom"); return m },
+		"clone folder": func() model {
+			m := base()
+			m.mode, m.cloneConfirmation, m.enteringCloneFolder, m.cloneFolderInput = searchMode, "a/b", true, "week-one"
+			return m
+		},
+		"clone confirm":   func() model { m := base(); m.mode, m.cloneConfirmation = searchMode, "a/b"; return m },
+		"help":            func() model { m := base(); m.helpVisible = true; return m },
+		"scan error":      func() model { m := base(); m.err = errors.New("boom"); return m },
+		"no repositories": func() model { m := base(); m.repositories = nil; return m },
+		"loading commits": func() model { m := base(); m.loadingCommits = true; return m },
+	}
+	for _, size := range sizes {
+		for name, build := range states {
+			m := build()
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+			view := updated.(model).View()
+			if got := lipgloss.Height(view); got != size.height {
+				t.Errorf("%s at %dx%d: height = %d, want %d", name, size.width, size.height, got, size.height)
+			}
+			for index, line := range strings.Split(view, "\n") {
+				if got := lipgloss.Width(line); got > size.width {
+					t.Errorf("%s at %dx%d: line %d width = %d, exceeds %d", name, size.width, size.height, index, got, size.width)
+				}
 			}
 		}
 	}
@@ -554,6 +601,68 @@ func TestCommitProgressBarCapsAtThreeSegments(t *testing.T) {
 	}
 }
 
+func TestTextFieldsShowTailOfLongValues(t *testing.T) {
+	// Inputs keep the caret at the end, so a value that does not fit must show
+	// its tail: the part being typed is the part worth seeing.
+	m := model{mode: setupMode, width: 30, height: 10, path: "/Users/penrose/Documents/MDS"}
+	view := m.setupView()
+	if !strings.Contains(view, "…ers/penrose/Documents/MDS") {
+		t.Fatalf("expected the setup path to show its tail, got %q", view)
+	}
+	if strings.Contains(view, "/Users/penrose/Do") {
+		t.Fatalf("expected the setup path to be trimmed from the left, got %q", view)
+	}
+}
+
+func TestCommitProgressBarIsPlainUnderNoColor(t *testing.T) {
+	// The bar is the densest colour carrier in the list, so it must survive a
+	// colourless terminal: glyphs alone have to communicate the magnitude.
+	for _, count := range []int{0, 1, 2, 3, 5} {
+		if got := lipgloss.Width(commitProgressBar(count)); got != commitProgressWidth {
+			t.Errorf("commitProgressBar(%d) width = %d, want %d", count, got, commitProgressWidth)
+		}
+	}
+	if got, want := ansi.Strip(commitProgressBar(3)), "████████████"; got != want {
+		t.Errorf("stripped commitProgressBar(3) = %q, want %q", got, want)
+	}
+}
+
+func TestStatusMessagesExpireOnceAndAreNotClearedEarly(t *testing.T) {
+	// A transient status must not outlive its timer, and a newer status must not
+	// be wiped by the older status' still-pending timer.
+	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}}
+
+	updated, cmd := m.Update(repositoryActionMsg{err: errors.New("first")})
+	m = updated.(model)
+	if m.actionStatus != "Action failed: first" {
+		t.Fatalf("actionStatus = %q, want %q", m.actionStatus, "Action failed: first")
+	}
+	if cmd == nil {
+		t.Fatal("expected a status to arm an expiry timer")
+	}
+	firstToken := m.statusToken
+
+	updated, _ = m.Update(repositoryActionMsg{err: errors.New("second")})
+	m = updated.(model)
+	if m.statusToken == firstToken {
+		t.Fatal("expected a newer status to take ownership of the timer")
+	}
+
+	// The stale timer from "first" must be ignored.
+	updated, _ = m.Update(statusExpiryMsg{token: firstToken})
+	m = updated.(model)
+	if m.actionStatus != "Action failed: second" {
+		t.Fatalf("stale timer cleared the newer status: actionStatus = %q", m.actionStatus)
+	}
+
+	// The current timer clears it.
+	updated, _ = m.Update(statusExpiryMsg{token: m.statusToken})
+	m = updated.(model)
+	if m.actionStatus != "" {
+		t.Fatalf("current timer left actionStatus = %q, want empty", m.actionStatus)
+	}
+}
+
 func TestTrackedRepositoryRendersCommitProgress(t *testing.T) {
 	m := model{mode: repositoriesMode, width: 80, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{"511/lab-one": true}, commitCounts: map[string]int{"511/lab-one": 5}, collapsed: map[string]bool{}}
 	if view := m.repositoriesView(); !strings.Contains(view, "5/3") || strings.Index(view, "████████████") > strings.Index(view, "5/3") {
@@ -579,6 +688,28 @@ func TestTruncateForTerminalWidth(t *testing.T) {
 	}
 	if got, want := truncateLeft("/Users/penrose/Documents/MDS", 12), "…cuments/MDS"; got != want {
 		t.Fatalf("truncateLeft() = %q, want %q", got, want)
+	}
+	// Wide (CJK) and emoji runes occupy two cells, so a cell budget must not be
+	// treated as a rune budget or the line overflows the terminal.
+	for _, tc := range []struct {
+		name  string
+		value string
+		width int
+	}{
+		{"cjk", "课程一/lab-one", 8},
+		{"emoji", "lab-🎉-one", 7},
+		{"mixed", "資料/DSCI_511_😀", 6},
+	} {
+		for _, got := range []string{truncate(tc.value, tc.width), truncateLeft(tc.value, tc.width)} {
+			if w := lipgloss.Width(got); w > tc.width {
+				t.Errorf("%s: %q renders %d cells, exceeds %d", tc.name, got, w, tc.width)
+			}
+		}
+	}
+	// Styled input must be measured by its visible text, not its escape codes.
+	styled := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true).Render("repository-name")
+	if got := lipgloss.Width(truncate(styled, 8)); got > 8 {
+		t.Errorf("styled truncate() renders %d cells, exceeds 8", got)
 	}
 }
 
