@@ -1072,3 +1072,184 @@ func TestScrollIsRecomputedWhenTheRowSetChanges(t *testing.T) {
 		t.Fatalf("scrollTop after filtering to no rows = %d, want 0", m.scrollTop)
 	}
 }
+
+// --- Request 7: rename prompt visibility, caret blink, count fallback, legend ---
+
+// editorModel returns a repositories screen with the rename editor open and the
+// given value already typed.
+func editorModel(height int, value string) model {
+	m := model{
+		mode: repositoriesMode, width: 72, height: height, path: "/tmp/mds",
+		repositories:   []string{"511/lab-one", "511/lab-two", "522/lab-three"},
+		favorites:      map[string]bool{},
+		collapsed:      map[string]bool{},
+		groupTitles:    map[string]string{},
+		commitCounts:   map[string]int{},
+		commitErrors:   map[string]error{},
+		editingTitle:   true,
+		titleNameInput: newTextValue("Group name: "),
+		titleInput:     value,
+	}
+	return m
+}
+
+// TestRenamePromptStaysVisibleOnShortTerminals is the regression guard for the
+// reported "I cannot see what I type" behaviour. The body is a fixed height and
+// the row list used to consume all of it, so the prompt was the first line the
+// block dropped.
+func TestRenamePromptStaysVisibleOnShortTerminals(t *testing.T) {
+	for _, height := range []int{4, 6, 8, 10, 14, 24} {
+		m := editorModel(height, "Renamed Group")
+		view := ansi.Strip(m.View())
+		if !strings.Contains(view, "Renamed Group") {
+			t.Errorf("height %d: typed value missing from view %q", height, view)
+		}
+		if !strings.Contains(view, "Rename group:") {
+			t.Errorf("height %d: rename prompt missing from view %q", height, view)
+		}
+	}
+}
+
+// TestTypedRenameTextIsVisibleWhileEditing types through the real Update path so
+// the rendered value is the one the input actually holds.
+func TestTypedRenameTextIsVisibleWhileEditing(t *testing.T) {
+	m := editorModel(8, "")
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(model)
+	for _, r := range "Renamed" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model)
+	}
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "Renamed") {
+		t.Fatalf("typed text missing from view %q", view)
+	}
+}
+
+// TestCaretBlinksWhileRenaming drives the timer the app owns. The caret glyph
+// must alternate between the visible block and a blank cell, and a tick left
+// over from a closed editor must not touch anything.
+func TestCaretBlinksWhileRenaming(t *testing.T) {
+	m := model{
+		mode: repositoriesMode, width: 72, height: 20, path: "/tmp/mds",
+		repositories: []string{"511/lab-one"}, favorites: map[string]bool{},
+		collapsed: map[string]bool{}, groupTitles: map[string]string{},
+	}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(model)
+	if !m.editingTitle {
+		t.Fatal("expected e to open the rename editor")
+	}
+	if !m.blinkActive {
+		t.Fatal("expected opening the rename editor to arm the caret blink")
+	}
+	if cmd == nil {
+		t.Fatal("expected opening the rename editor to return the blink timer")
+	}
+
+	updated, cmd = m.Update(blinkMsg{token: m.blinkToken})
+	m = updated.(model)
+	if m.titleNameInput.input.Cursor.Blink != true {
+		t.Fatal("expected the first tick to flip the cursor into its blank frame")
+	}
+	if cmd == nil {
+		t.Fatal("expected a blink tick to re-arm the timer")
+	}
+
+	updated, _ = m.Update(blinkMsg{token: m.blinkToken})
+	if blink := updated.(model).titleNameInput.input.Cursor.Blink; blink != false {
+		t.Fatal("expected the second tick to flip the cursor back to the block frame")
+	}
+
+	before := m.titleNameInput.input.Cursor.Blink
+	updated, cmd = m.Update(blinkMsg{token: m.blinkToken + 99})
+	if blink := updated.(model).titleNameInput.input.Cursor.Blink; blink != before {
+		t.Fatal("expected a stale blink tick to be ignored")
+	}
+	if cmd != nil {
+		t.Fatal("expected a stale blink tick not to re-arm the timer")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m = updated.(model); m.editingTitle || m.blinkActive {
+		t.Fatal("expected Esc to close the rename editor and stop the blink")
+	}
+}
+
+// TestCaretGlyphsAlternate pins the two frames the caret renders.
+func TestCaretGlyphsAlternate(t *testing.T) {
+	if got := textCaret(true); got != " " {
+		t.Fatalf("blank frame = %q, want a space", got)
+	}
+	if got := textCaret(false); got != "█" {
+		t.Fatalf("block frame = %q, want █", got)
+	}
+}
+
+// TestSettingsValueEditorStaysVisibleOnShortTerminals covers the other editor
+// that shares the reserved rows.
+func TestSettingsValueEditorStaysVisibleOnShortTerminals(t *testing.T) {
+	for _, height := range []int{4, 6, 8, 12, 24} {
+		m := model{
+			mode: settingsMode, width: 72, height: height, path: "/tmp/mds",
+			favorites: map[string]bool{}, collapsed: map[string]bool{},
+			groupTitles:    map[string]string{},
+			editingSetting: "profile-name", settingInput: "Shrey Mudgal",
+		}
+		if view := ansi.Strip(m.View()); !strings.Contains(view, "Shrey Mudgal") {
+			t.Errorf("height %d: settings value missing from view %q", height, view)
+		}
+	}
+}
+
+// TestShortHelpListsRenameShortcut is the regression guard for the missing e
+// shortcut in the footer legend.
+func TestShortHelpListsRenameShortcut(t *testing.T) {
+	found := false
+	for _, binding := range repoKeys.ShortHelp() {
+		if key, _ := binding.Help().Key, binding.Help().Desc; key == repoKeys.Rename.Help().Key {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected the short help legend to list the e rename shortcut")
+	}
+	if got := repoKeys.Rename.Help().Desc; got != "rename" {
+		t.Fatalf("rename help description = %q, want rename", got)
+	}
+	now := time.Now()
+	m := model{mode: repositoriesMode, width: 110, height: 20, repositories: []string{"511/lab-one"}, favorites: map[string]bool{}, collapsed: map[string]bool{}, lastRefresh: now, nextRefresh: now.Add(5 * time.Minute)}
+	if view := ansi.Strip(m.repositoriesView()); !strings.Contains(view, "e rename") {
+		t.Fatalf("expected the repository footer to show the rename shortcut, got %q", view)
+	}
+}
+
+// TestTrackedCommitCountsAcceptProfileNameAlone is the regression guard for the
+// vanished commit counter: the loader used to bail out whenever the GitHub
+// username was blank, which threw away the profile display name fallback.
+func TestTrackedCommitCountsAcceptProfileNameAlone(t *testing.T) {
+	workspace := t.TempDir()
+	repository := "DSCI_511_lab1/mds"
+	if err := os.MkdirAll(filepath.Join(workspace, repository), 0o755); err != nil {
+		t.Fatalf("create workspace repository: %v", err)
+	}
+	tracked := map[string]bool{repository: true}
+
+	// A non-repository directory cannot yield a count, but reaching that
+	// failure at all proves the loader looked instead of bailing out on the
+	// blank username. Bailing out leaves errors empty.
+	message := loadTrackedCommitCounts(workspace, []string{repository}, tracked, "", "Shrey Mudgal", "github.ubc.ca")()
+	counts, ok := message.(commitCountsMsg)
+	if !ok {
+		t.Fatalf("message = %T, want commitCountsMsg", message)
+	}
+	if len(counts.errors) != 1 {
+		t.Fatalf("errors = %v, want the tracked repository to be inspected despite a blank username", counts.errors)
+	}
+
+	// Without a profile name there is genuinely nothing to match on.
+	message = loadTrackedCommitCounts(workspace, []string{repository}, tracked, "", "", "github.ubc.ca")()
+	counts, _ = message.(commitCountsMsg)
+	if len(counts.errors) != 0 {
+		t.Fatalf("errors = %v, want no lookup when both identifier fields are blank", counts.errors)
+	}
+}

@@ -52,6 +52,11 @@ var chromeStyle = lipgloss.NewStyle().Padding(0, 0, 0, layoutGutter)
 
 const statusLifetime = 4 * time.Second
 
+// blinkInterval is the caret blink half-period. Bubbles' own cursor default is
+// 530ms; the value is restated here because this app drives the timer itself
+// (Bubbles' start-of-cycle message is unexported and cannot be intercepted).
+const blinkInterval = 530 * time.Millisecond
+
 // minLegendWidth is the narrowest footer that still shows a useful legend
 // alongside the refresh clock. Below it the clock is dropped instead of
 // squeezing the bindings down to an ellipsis.
@@ -101,6 +106,13 @@ type commitCountsMsg struct {
 
 type refreshTickMsg struct {
 	at time.Time
+}
+
+// blinkMsg advances the caret blink of the field currently being typed into.
+// The token identifies the timer generation so a tick left over from a closed
+// editor can never disturb the cycle that replaced it.
+type blinkMsg struct {
+	token int
 }
 
 // statusExpiryMsg fires once per transient status message so stale notifications
@@ -181,7 +193,7 @@ var repoKeys = keyMap{
 // the footer has one row shared with the refresh clock, so the always-visible
 // legend stays short and ends with ? help for everything else.
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Move, k.Track, k.Search, k.Open, k.GitHub, k.Help}
+	return []key.Binding{k.Move, k.Track, k.Search, k.Rename, k.Open, k.GitHub, k.Help}
 }
 
 // FullHelp drives the ? overlay, grouped by intent.
@@ -252,6 +264,11 @@ type model struct {
 	// statusToken identifies the most recent transient status message. Expiry
 	// messages carrying a stale token are ignored.
 	statusToken int
+	// blinkToken identifies the caret blink timer generation. Advancing it
+	// invalidates any tick still in flight from a previous editing session.
+	blinkToken int
+	// blinkActive reports whether the caret blink cycle is currently running.
+	blinkActive bool
 	spinner     spinner.Model
 	help        help.Model
 
@@ -383,14 +400,35 @@ func (t *textValue) update(msg tea.KeyMsg, value string) (string, tea.Cmd) {
 
 // render draws prompt plus text plus a cursor block, trimmed to width cells and
 // showing the tail of the text when it does not fit.
+//
+// The caret glyph is read from the textinput's own blink state rather than being
+// hardcoded, so the caret actually blinks. textinput inverts this state (its
+// cursor renders the plain text style while Blink is true and the reversed block
+// while it is false), and View must stay pure, so the toggle is driven by a
+// blink timer in Update and merely read here.
 func (t textValue) render(width int, value string) string {
 	t = t.ready()
 	t.bind(value)
 	inner := max(1, width-lipgloss.Width(t.prompt))
-	// The cursor block occupies one cell, so the text gets the rest. Inputs show
+	caret := textCaret(t.input.Cursor.Blink)
+	// The caret occupies the last cell of the prompt's width. Text keeps the
+	// cell before it so the caret never sits on top of the tail. Inputs show
 	// their tail because the caret is at the end.
 	text := max(1, inner-1)
-	return promptStyle.Render(t.prompt + truncateLeft(t.input.Value(), text) + "█")
+	tail := truncateLeft(t.input.Value(), text)
+	pad := strings.Repeat(" ", max(0, text-lipgloss.Width(tail)))
+	return promptStyle.Render(t.prompt + tail + pad + caret)
+}
+
+// textCaret is the one-cell caret glyph for a blink state. true is the "off"
+// half of the cycle (the field shows its plain text), false is the visible
+// block; matching textinput's own inverted convention keeps a real blinking
+// cursor consistent with the component's.
+func textCaret(blink bool) string {
+	if blink {
+		return " "
+	}
+	return "█"
 }
 
 func main() {
@@ -472,6 +510,58 @@ func nextStatusExpiry(token int) tea.Cmd {
 	})
 }
 
+// nextBlink schedules the next caret toggle for the given timer generation.
+func nextBlink(token int) tea.Cmd {
+	return tea.Tick(blinkInterval, func(time.Time) tea.Msg {
+		return blinkMsg{token: token}
+	})
+}
+
+// synchronizeBlink starts and stops the caret blink cycle to match whether a
+// text editor is active. Driving it from one place keeps every editor - the
+// rename prompt, the settings value, the search filters - blinking, instead of
+// relying on each key handler to remember to arm a timer and to stop it again.
+func (m *model) synchronizeBlink(cmd tea.Cmd) tea.Cmd {
+	active := m.editingField() != nil
+	switch {
+	case active && !m.blinkActive:
+		m.blinkActive = true
+		m.blinkToken++
+		return tea.Batch(cmd, nextBlink(m.blinkToken))
+	case !active && m.blinkActive:
+		// Bumping the token retires any tick already in flight, so a closed
+		// editor cannot keep toggling a field nobody is looking at.
+		m.blinkActive = false
+		m.blinkToken++
+	}
+	return cmd
+}
+
+// editingField is the text field the user is currently typing into, or nil when
+// no field is active. Pointer receivers matter: the blink timer has to write the
+// toggled cursor back onto the field that owns it.
+func (m *model) editingField() *textValue {
+	switch m.mode {
+	case settingsMode:
+		if m.editingSetting != "" {
+			return &m.settingValueInput
+		}
+	case repositoriesMode:
+		if m.editingTitle {
+			return &m.titleNameInput
+		}
+		if m.localSearchActive {
+			return &m.localSearchInput
+		}
+	case searchMode:
+		if m.enteringCloneFolder {
+			return &m.folderNameInput
+		}
+		return &m.githubSearchInput
+	}
+	return nil
+}
+
 func (m model) refreshWorkspace() tea.Cmd {
 	return func() tea.Msg {
 		repositories, err := findRepositories(m.path)
@@ -492,15 +582,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, resized := msg.(tea.WindowSizeMsg); resized {
 		// A resize changes how many rows fit, so the pinned block and the
 		// window underneath it both have to be measured again.
+		cmd = next.synchronizeBlink(cmd)
 		return next.synchronizeScroll(), cmd
 	}
 	newStatus := (next.actionStatus != "" && next.actionStatus != m.actionStatus) ||
 		(next.cloneStatus != "" && next.cloneStatus != m.cloneStatus)
 	if !newStatus {
+		cmd = next.synchronizeBlink(cmd)
 		return next.synchronizeScroll(), cmd
 	}
 	next.statusToken++
-	return next.synchronizeScroll(), tea.Batch(cmd, nextStatusExpiry(next.statusToken))
+	cmd = next.synchronizeBlink(tea.Batch(cmd, nextStatusExpiry(next.statusToken)))
+	return next.synchronizeScroll(), cmd
 }
 
 func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -521,6 +614,16 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.actionStatus, m.cloneStatus = "", ""
 		return m, nil
+	case blinkMsg:
+		// Only the newest blink cycle may toggle the caret; ticks left over
+		// from a closed editor are stale and get dropped.
+		if msg.token != m.blinkToken {
+			return m, nil
+		}
+		if field := m.editingField(); field != nil {
+			field.input.Cursor.Blink = !field.input.Cursor.Blink
+		}
+		return m, nextBlink(m.blinkToken)
 	case commitCountsMsg:
 		for _, repository := range msg.repositories {
 			delete(m.commitCounts, repository)
@@ -882,17 +985,22 @@ func (m model) settingsView() string {
 	width := m.contentWidth()
 	header := []string{titleStyle.Render("mds") + "  " + mutedStyle.Render("Settings")}
 	body := []string{}
-	for index, setting := range settingsValues(m) {
+	settings := settingsValues(m)
+	// Window the list so the selected row stays on screen on a short terminal.
+	// The window gives up exactly the rows the value editor reserves, which is
+	// what keeps the prompt below from being clipped away.
+	room := m.listCapacity()
+	start := max(0, min(m.settingsCursor, max(0, len(settings)-room)))
+	end := min(len(settings), start+room)
+	for index, setting := range settings[start:end] {
 		prefix := "  "
 		style := mutedStyle
-		if index == m.settingsCursor {
+		if start+index == m.settingsCursor {
 			prefix, style = "▸ ", cursorStyle
 		}
 		body = append(body, style.Render(truncate(prefix+setting.label+": "+setting.value, width)))
 	}
-	if m.editingSetting != "" {
-		body = append(body, blankLine, m.settingValueInput.render(width, m.settingInput), mutedStyle.Render("Enter save · Esc cancel"))
-	}
+	body = append(body, m.editorOverlayRowsView(width)...)
 	if m.err != nil {
 		body = append(body, blankLine, errorStyle.Render(truncate("Error: "+m.err.Error(), width)))
 	}
@@ -1322,12 +1430,10 @@ func (m model) repositoriesView() string {
 		body = append(body, errorStyle.Render(truncate("Unable to scan repositories: "+m.err.Error(), width)))
 	} else if len(m.repositories) == 0 {
 		body = append(body, mutedStyle.Render("No Git repositories found in this folder."))
-	} else {
-		body = append(body, m.repositoryRowsView(width)...)
+	} else if rows := m.repositoryRowsView(width); len(rows) > 0 {
+		body = append(body, rows...)
 	}
-	if m.editingTitle {
-		body = append(body, blankLine, m.titleField().render(width, m.titleInput), mutedStyle.Render("Enter save · Esc cancel · empty restores the folder name"))
-	}
+	body = append(body, m.editorOverlayRowsView(width)...)
 	if repository, err := m.firstCommitError(); err != nil {
 		body = append(body, blankLine, errorStyle.Render(truncate(fmt.Sprintf("gh error (%s): %v", repository, err), width)))
 	}
@@ -1339,11 +1445,17 @@ func (m model) repositoriesView() string {
 // scrolls through a window that only moves when the cursor crosses an edge.
 // The window is read from m.scrollTop, which Update keeps in sync.
 func (m model) repositoryRowsView(width int) []string {
+	room := m.listCapacity()
+	if room == 0 {
+		// An open editor has taken every body row; the list yields rather than
+		// pushing the prompt off the bottom of the screen.
+		return nil
+	}
 	rows := m.repositoryListRows()
 	pinnedLen := m.pinnedRowCount(rows)
 	budget := m.rowBudget()
 
-	lines := make([]string, 0, m.visibleRows()+1)
+	lines := make([]string, 0, room+1)
 	for index, row := range rows[:pinnedLen] {
 		lines = append(lines, m.repositoryRowLine(row, width, index == m.cursor))
 	}
@@ -1501,7 +1613,7 @@ func (m model) repositoryRowView(row repositoryListRow, width int, selected bool
 func (m model) repositoryFooter(width int) string {
 	switch {
 	case m.localSearchActive:
-		return "/ " + m.localSearch + "█ · ↑/↓ move · Enter track · Esc clear search"
+		return "/ " + m.localSearch + textCaret(m.localSearchInput.input.Cursor.Blink) + " · ↑/↓ move · Enter track · Esc clear search"
 	case m.searchChooser:
 		return "Search · l local workspace · g GitHub repositories · Esc cancel"
 	case m.editorActions:
@@ -1670,7 +1782,7 @@ func (m model) rowBudget() int {
 		// Nothing left to scroll, everything fits in the pinned block.
 		return 1
 	}
-	return max(1, m.visibleRows()-pinned)
+	return max(1, m.listCapacity()-pinned)
 }
 
 // repositoryVisibleRows is the number of scrollable rows that fit in the row
@@ -1700,7 +1812,7 @@ func (m model) pinnedRowCount(rows []repositoryListRow) int {
 		// scrollable window starts on the first row of the next group.
 		pinned++
 	}
-	if pinned+repositoryMinScrollRoom > m.visibleRows() {
+	if pinned+repositoryMinScrollRoom > m.listCapacity() {
 		return 0
 	}
 	return pinned
@@ -1760,6 +1872,64 @@ func (m model) clock() time.Time {
 // off the bottom of a short terminal.
 func (m model) visibleRows() int {
 	return max(1, m.contentHeight())
+}
+
+// listCapacity is how many rows the windowed lists may occupy once an open text
+// editor has taken the rows it needs for itself. It can be zero on a very short
+// terminal, and the caller then renders no list rows at all: block() drops
+// overflow from the bottom, so a list that ignores the editor would be clipped
+// together with the prompt the user is typing into.
+func (m model) listCapacity() int {
+	return max(0, m.contentHeight()-m.editorOverlayRows())
+}
+
+// editorOverlayActive reports whether the current screen shows a text editor
+// that takes body rows away from the list beneath it.
+func (m model) editorOverlayActive() bool {
+	return (m.mode == repositoriesMode && m.editingTitle) || (m.mode == settingsMode && m.editingSetting != "")
+}
+
+// editorOverlayRows is how many body rows an open editor needs: a blank
+// separator, the prompt, and the hint. It is clamped to the body so the same
+// number can be reserved and rendered even on the shortest terminal.
+func (m model) editorOverlayRows() int {
+	if !m.editorOverlayActive() {
+		return 0
+	}
+	return min(3, m.contentHeight())
+}
+
+// editorOverlayRowsView builds the open editor's body rows, trimmed to the room
+// the body can spare. The hint goes before the prompt, so the text being typed
+// is the last thing to disappear on a very short terminal.
+func (m model) editorOverlayRowsView(width int) []string {
+	if !m.editorOverlayActive() {
+		return nil
+	}
+	line, hint := m.editorOverlayContent(width)
+	switch m.editorOverlayRows() {
+	case 0:
+		return nil
+	case 1:
+		return []string{line}
+	case 2:
+		return []string{line, mutedStyle.Render(truncate(hint, width))}
+	default:
+		return []string{blankLine, line, mutedStyle.Render(truncate(hint, width))}
+	}
+}
+
+// editorOverlayContent is the prompt line and its hint for the open editor. The
+// text is read here rather than at the call sites so both views reserve exactly
+// the rows they later render.
+func (m model) editorOverlayContent(width int) (string, string) {
+	switch {
+	case m.mode == repositoriesMode && m.editingTitle:
+		return m.titleField().render(width, m.titleInput), "Enter save · Esc cancel · empty restores the folder name"
+	case m.mode == settingsMode && m.editingSetting != "":
+		return m.settingValueInput.render(width, m.settingInput), "Enter save · Esc cancel"
+	}
+	return "", ""
 }
 
 // fullScreen composes header, body and footer into exactly viewportHeight lines
@@ -1934,7 +2104,10 @@ func loadTrackedCommitCounts(workspace string, repositories []string, favorites 
 	return func() tea.Msg {
 		counts := make(map[string]int)
 		failures := make(map[string]error)
-		if username == "" {
+		if strings.TrimSpace(username) == "" && strings.TrimSpace(profileName) == "" {
+			// Nothing to match commits against. A configured profile display
+			// name is still usable on its own, so only bail when both are
+			// missing.
 			return commitCountsMsg{counts: counts, errors: failures, repositories: repositories}
 		}
 		for _, repository := range repositories {
