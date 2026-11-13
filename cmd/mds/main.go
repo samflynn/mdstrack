@@ -38,6 +38,12 @@ const (
 	layoutMinWidth = 24
 	layoutMinBody  = 1
 	blankLine      = " "
+
+	// repositoryMinScrollRoom is how many body rows must remain scrollable for
+	// the tracked block to be pinned at all. One row is the scrolled-to row and
+	// one is the overflow indicator that reports it, so pinning fewer rows than
+	// the body needs would leave a row with no window to render into.
+	repositoryMinScrollRoom = 2
 )
 
 // chromeStyle frames the whole interface. It carries the gutter and nothing
@@ -232,9 +238,14 @@ type model struct {
 	enteringCloneFolder    bool
 	cloneStatus            string
 	cursor                 int
-	err                    error
-	width                  int
-	height                 int
+	// scrollTop is the first scrollable row shown under the pinned tracking
+	// section. It is owned by Update (see synchronizeScroll) rather than derived
+	// inside View, because a sticky window is stateful: it must only advance
+	// when the cursor crosses an edge, not track the cursor every frame.
+	scrollTop int
+	err       error
+	width     int
+	height    int
 	// now is the single clock reading the view layer is allowed to use, so
 	// View() stays deterministic and the renderer never sees a diffing artefact.
 	now time.Time
@@ -479,15 +490,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return updated, cmd
 	}
 	if _, resized := msg.(tea.WindowSizeMsg); resized {
-		return next, cmd
+		// A resize changes how many rows fit, so the pinned block and the
+		// window underneath it both have to be measured again.
+		return next.synchronizeScroll(), cmd
 	}
 	newStatus := (next.actionStatus != "" && next.actionStatus != m.actionStatus) ||
 		(next.cloneStatus != "" && next.cloneStatus != m.cloneStatus)
 	if !newStatus {
-		return next, cmd
+		return next.synchronizeScroll(), cmd
 	}
 	next.statusToken++
-	return next, tea.Batch(cmd, nextStatusExpiry(next.statusToken))
+	return next.synchronizeScroll(), tea.Batch(cmd, nextStatusExpiry(next.statusToken))
 }
 
 func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1321,54 +1334,117 @@ func (m model) repositoriesView() string {
 	return m.fullScreen(header, body, []string{mutedStyle.Render(truncate(m.repositoryFooter(width), width))})
 }
 
-// repositoryRowsView renders the scrolling list window. The visible count comes
-// from the body height so the cursor always has a row to sit on, and the
-// overflow indicator is only reserved when the list is actually clipped.
+// repositoryRowsView renders the repository list. The tracked (favourite)
+// block stays pinned at the top so it is always visible; everything below it
+// scrolls through a window that only moves when the cursor crosses an edge.
+// The window is read from m.scrollTop, which Update keeps in sync.
 func (m model) repositoryRowsView(width int) []string {
 	rows := m.repositoryListRows()
-	start, end := m.repositoryWindow(rows)
-	overflow := start > 0 || end < len(rows)
-	visible := m.repositoryVisibleRows(overflow)
-	start = max(0, min(m.cursor, max(0, len(rows)-visible)))
-	end = min(len(rows), start+visible)
-	if overflow {
-		// Re-check against the window we actually settled on.
-		overflow = start > 0 || end < len(rows)
+	pinnedLen := m.pinnedRowCount(rows)
+	budget := m.rowBudget()
+
+	lines := make([]string, 0, m.visibleRows()+1)
+	for index, row := range rows[:pinnedLen] {
+		lines = append(lines, m.repositoryRowLine(row, width, index == m.cursor))
 	}
 
-	lines := make([]string, 0, visible+1)
-	for index, row := range rows[start:end] {
-		selected := start+index == m.cursor
-		if row.key == "divider" {
-			lines = append(lines, mutedStyle.Render(strings.Repeat("─", width)))
-			continue
-		}
-		indent := ""
-		if strings.HasPrefix(row.key, "favorite:") {
-			indent = "  "
-		}
-		if row.header {
-			prefix := "⌄ "
-			if m.collapsed[row.key] {
-				prefix = "› "
-			}
-			label := indent + prefix + truncate(strings.ToUpper(row.group), width-len(indent)-3)
-			switch {
-			case selected:
-				lines = append(lines, cursorStyle.Render("▸ "+label))
-			case row.key == "favorites":
-				lines = append(lines, favoriteStyle.Render("★ "+label))
-			default:
-				lines = append(lines, groupStyle.Render(label))
-			}
-			continue
-		}
-		lines = append(lines, m.repositoryRowView(row, width, selected, indent))
+	scrollable := rows[pinnedLen:]
+	start, end, overflow := m.scrollWindow(scrollable, m.cursor-pinnedLen, budget)
+	for index, row := range scrollable[start:end] {
+		lines = append(lines, m.repositoryRowLine(row, width, pinnedLen+start+index == m.cursor))
 	}
 	if overflow {
-		lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", start+1, end, len(rows))))
+		lines = append(lines, mutedStyle.Render(fmt.Sprintf("%d–%d of %d", pinnedLen+start+1, pinnedLen+end, len(rows))))
 	}
 	return lines
+}
+
+// pinnedBlockRows returns the leading rows that never scroll: the tracked
+// section's title, every tracked group header and its repository rows. The
+// group headers inside the tracked section are keyed "favorite:", which is what
+// separates them from the scrolling "group:" rows below. A collapsed section
+// pins only its title row; there is no tracked section it returns nothing.
+func (m model) pinnedBlockRows(rows []repositoryListRow) []repositoryListRow {
+	if len(rows) == 0 || rows[0].key != "favorites" {
+		return nil
+	}
+	if m.collapsed["favorites"] {
+		return rows[:1]
+	}
+	end := 1
+	for end < len(rows) && strings.HasPrefix(rows[end].key, "favorite:") {
+		end++
+	}
+	return rows[:end]
+}
+
+// scrollWindow is the edge-crossing window over the scrollable rows: the
+// selected row moves freely inside the window and only drags it along once it
+// would otherwise leave it. That is what stops the selection from being pinned
+// to the top of the screen for the whole scroll.
+//
+// cursor is an index into rows, not into the whole list; callers holding a
+// list-wide cursor subtract the pinned block length before calling.
+func (m model) scrollWindow(rows []repositoryListRow, cursor, budget int) (int, int, bool) {
+	count := len(rows)
+	if count == 0 {
+		return 0, 0, false
+	}
+	visible := m.repositoryVisibleRows(budget, count > budget)
+	start := max(0, min(m.scrollTop, max(0, count-visible)))
+	cursorRow := max(0, min(cursor, count-1))
+	if cursorRow < start {
+		start = cursorRow
+	}
+	if cursorRow >= start+visible {
+		start = cursorRow - visible + 1
+	}
+	start = max(0, min(start, max(0, count-visible)))
+	end := min(count, start+visible)
+	return start, end, start > 0 || end < count
+}
+
+// repositoryRowLine renders one list row at the given indent.
+func (m model) repositoryRowLine(row repositoryListRow, width int, selected bool) string {
+	if row.key == "divider" {
+		return mutedStyle.Render(strings.Repeat("─", width))
+	}
+	indent := ""
+	if strings.HasPrefix(row.key, "favorite:") {
+		indent = "  "
+	}
+	if row.header {
+		prefix := "⌄ "
+		if m.collapsed[row.key] {
+			prefix = "› "
+		}
+		label := indent + prefix + truncate(strings.ToUpper(row.group), width-len(indent)-3)
+		switch {
+		case selected:
+			return cursorStyle.Render("▸ " + label)
+		case row.key == "favorites":
+			return favoriteStyle.Render("★ " + label)
+		default:
+			return groupStyle.Render(label)
+		}
+	}
+	return m.repositoryRowView(row, width, selected, indent)
+}
+
+// synchronizeScroll re-anchors the scroll window after an event that can move
+// the cursor or change the row set. View only reads scrollTop, so every
+// mutation has to happen here, inside Update.
+func (m model) synchronizeScroll() model {
+	rows := m.repositoryListRows()
+	pinned := m.pinnedRowCount(rows)
+	scrollable := rows[pinned:]
+	if len(scrollable) == 0 {
+		m.scrollTop = 0
+		return m
+	}
+	start, _, _ := m.scrollWindow(scrollable, m.cursor-pinned, m.rowBudget())
+	m.scrollTop = start
+	return m
 }
 
 // repositoryRowView renders one repository line: the tracking marker and name
@@ -1585,27 +1661,49 @@ func (m model) moveCursor(rows []repositoryListRow, direction int) int {
 	return cursor
 }
 
-// repositoryVisibleRows is the number of repository rows that fit in the body.
-// The overflow indicator steals a row, so it has to be accounted for while
-// scrolling rather than being appended after the fact (which would push the
-// footer off the screen).
-func (m model) repositoryVisibleRows(overflow bool) int {
-	rows := m.visibleRows()
-	if overflow {
-		rows--
+// rowBudget is the number of list rows the scrollable window may occupy: the
+// body height minus any rows the pinned tracked block has already taken.
+func (m model) rowBudget() int {
+	rows := m.repositoryListRows()
+	pinned := m.pinnedRowCount(rows)
+	if pinned >= len(rows) {
+		// Nothing left to scroll, everything fits in the pinned block.
+		return 1
 	}
-	return max(1, rows)
+	return max(1, m.visibleRows()-pinned)
 }
 
-func (m model) repositoryWindow(rows []repositoryListRow) (int, int) {
-	visible := max(1, m.visibleRows())
-	cursorRow := min(m.cursor, max(0, len(rows)-1))
-	start := max(0, cursorRow-visible+1)
-	end := min(len(rows), start+visible)
-	if end-start < visible {
-		start = max(0, end-visible)
+// repositoryVisibleRows is the number of scrollable rows that fit in the row
+// budget. The overflow indicator steals a row, so it has to be accounted for
+// while scrolling rather than being appended after the fact (which would push
+// the footer off the screen).
+func (m model) repositoryVisibleRows(budget int, overflow bool) int {
+	if overflow {
+		budget--
 	}
-	return start, end
+	return max(1, budget)
+}
+
+// pinnedRowCount is how many leading rows stay fixed: the tracked section's
+// header, its repository rows, and the divider that closes it. It is zero when
+// there is no tracked section or when the block would leave no room to scroll
+// (a pinned block with no scrollable row under it would clip the cursor off the
+// screen); the list then falls back to plain scrolling.
+func (m model) pinnedRowCount(rows []repositoryListRow) int {
+	block := m.pinnedBlockRows(rows)
+	pinned := len(block)
+	if pinned == 0 {
+		return 0
+	}
+	if pinned < len(rows) && rows[pinned].key == "divider" {
+		// The divider that closes the tracked block rides with it, so the
+		// scrollable window starts on the first row of the next group.
+		pinned++
+	}
+	if pinned+repositoryMinScrollRoom > m.visibleRows() {
+		return 0
+	}
+	return pinned
 }
 
 func repositoryGroup(repository string) (string, string) {

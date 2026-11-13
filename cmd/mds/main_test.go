@@ -875,3 +875,200 @@ func TestFindRepositoriesFindsAndSortsNestedRepositories(t *testing.T) {
 		t.Fatalf("findRepositories() = %v, want %v", repositories, want)
 	}
 }
+
+// scrollingModel builds a list of nine repositories in three groups with two
+// tracked repositories that live in different groups, so the tracked block
+// contains a group header for each of them. Width 64 height 14 leaves ten body
+// rows for sixteen list rows, which is enough for the block to pin and for the
+// rest to scroll.
+func scrollingModel() model {
+	repositories := []string{}
+	for _, lab := range []string{"lab-1", "lab-2", "lab-3"} {
+		for _, name := range []string{"a", "b", "c"} {
+			repositories = append(repositories, "DSCI_511_"+lab+"/"+name)
+		}
+	}
+	repositories = append(repositories, "DSCI_522_lab-1/a", "DSCI_522_lab-2/b", "DSCI_522_lab-3/c")
+	m := model{
+		mode: repositoriesMode, width: 64, height: 14, now: time.Now(),
+		repositories: repositories, favorites: map[string]bool{}, collapsed: map[string]bool{},
+		groupTitles:    map[string]string{},
+		favoritesTitle: "Priority",
+		commitCounts:   map[string]int{},
+		commitErrors:   map[string]error{},
+	}
+	m.favorites[repositories[0]] = true
+	m.favorites[repositories[4]] = true
+	return m
+}
+
+// bodyLines returns the rendered body of the repositories screen, which is
+// everything between the accent rule and the footer.
+func bodyLines(t *testing.T, m model) []string {
+	t.Helper()
+	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("view has %d lines, want at least 4", len(lines))
+	}
+	return lines[2 : len(lines)-1]
+}
+
+// cursorBodyLine returns the body row the selection marker is drawn on. Rows
+// are rendered inside the gutter, so leading spaces are trimmed before looking
+// for the marker.
+func cursorBodyLine(t *testing.T, m model) int {
+	t.Helper()
+	for index, line := range bodyLines(t, m) {
+		if strings.HasPrefix(strings.TrimLeft(line, " "), "▸") {
+			return index
+		}
+	}
+	return -1
+}
+
+// TestRepositoryScrollingDoesNotPinTheSelectionToTheTop is the regression guard
+// for the reported behaviour: pressing down used to keep the selected row at
+// the top of the screen and scroll everything above it out of view instead of
+// moving the selection down the list.
+func TestRepositoryScrollingDoesNotPinTheSelectionToTheTop(t *testing.T) {
+	m := scrollingModel()
+	if m.scrollTop != 0 {
+		t.Fatalf("initial scrollTop = %d, want 0", m.scrollTop)
+	}
+	seen := map[int]bool{}
+	for step := 0; step < 12; step++ {
+		if line := cursorBodyLine(t, m); line >= 0 {
+			seen[line] = true
+		}
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updated.(model)
+	}
+	if len(seen) < 3 {
+		t.Fatalf("selection appeared on body lines %v; it must move down the window rather than staying pinned", seen)
+	}
+}
+
+// TestTrackedSectionStaysVisibleWhileScrolling checks that the whole tracking
+// block, including a group header per tracked repository, is present at every
+// scroll offset.
+func TestTrackedSectionStaysVisibleWhileScrolling(t *testing.T) {
+	m := scrollingModel()
+	rows := m.repositoryListRows()
+	pinned := m.pinnedRowCount(rows)
+	if pinned < 4 {
+		t.Fatalf("pinnedRowCount = %d, want the header, group headers and repositories for both tracked repos", pinned)
+	}
+	for step := 0; step < 16; step++ {
+		body := strings.Join(bodyLines(t, m), "\n")
+		if !strings.Contains(body, "PRIORITY (TRACKING)") {
+			t.Fatalf("step %d: tracking title missing from the body:\n%s", step, body)
+		}
+		for _, repository := range m.repositories {
+			if !m.favorites[repository] {
+				continue
+			}
+			_, name := repositoryGroup(repository)
+			if !strings.Contains(body, name) {
+				t.Fatalf("step %d: tracked repository %s missing from the body:\n%s", step, name, body)
+			}
+		}
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updated.(model)
+	}
+}
+
+// TestSelectionStaysInsideTheWindowAtEveryHeight guards the small-terminal
+// cases: the selection must always be rendered, whether the tracked block is
+// pinned or the list has fallen back to plain scrolling.
+func TestSelectionStaysInsideTheWindowAtEveryHeight(t *testing.T) {
+	for _, height := range []int{6, 8, 10, 12, 14, 20, 40} {
+		m := scrollingModel()
+		m.height = height
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 64, Height: height})
+		m = updated.(model)
+		rows := m.repositoryListRows()
+		for step := 0; step < len(rows)+2; step++ {
+			view := m.View()
+			if got := lipgloss.Height(view); got != height {
+				t.Fatalf("height %d step %d: rendered %d rows", height, step, got)
+			}
+			if cursorBodyLine(t, m) < 0 {
+				t.Fatalf("height %d step %d: cursor row is not visible:\n%s", height, step, ansi.Strip(view))
+			}
+			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+			m = updated.(model)
+		}
+	}
+}
+
+// TestWithoutTrackedRepositoriesNothingIsPinned keeps the plain list free of a
+// pinned block: with no favourites there is no tracking section to hold still.
+func TestWithoutTrackedRepositoriesNothingIsPinned(t *testing.T) {
+	m := scrollingModel()
+	m.favorites = map[string]bool{}
+	if got := m.pinnedRowCount(m.repositoryListRows()); got != 0 {
+		t.Fatalf("pinnedRowCount with no favourites = %d, want 0", got)
+	}
+	for step := 0; step < 6; step++ {
+		if cursorBodyLine(t, m) < 0 {
+			t.Fatalf("step %d: cursor row is not visible", step)
+		}
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updated.(model)
+	}
+}
+
+// TestTrackedBlockTooLargeFallsBackToScrolling covers a small terminal whose
+// body cannot hold the tracked block and a scrolled row at once. Pinning the
+// block there would leave nowhere to draw the selection, so the list has to
+// scroll normally instead.
+func TestTrackedBlockTooLargeFallsBackToScrolling(t *testing.T) {
+	m := scrollingModel()
+	// Track most of the list so the block far exceeds any small body.
+	for _, repository := range m.repositories {
+		m.favorites[repository] = true
+	}
+	m.height = 8
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 64, Height: 8})
+	m = updated.(model)
+	if got := m.pinnedRowCount(m.repositoryListRows()); got != 0 {
+		t.Fatalf("pinnedRowCount = %d, want 0 so the list can scroll", got)
+	}
+	for step := 0; step < 14; step++ {
+		if cursorBodyLine(t, m) < 0 {
+			t.Fatalf("step %d: cursor row is not visible:\n%s", step, ansi.Strip(m.View()))
+		}
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updated.(model)
+	}
+}
+
+// TestScrollIsRecomputedWhenTheRowSetChanges ensures a stale window cannot
+// survive a change that removes rows, such as collapsing a group or filtering.
+func TestScrollIsRecomputedWhenTheRowSetChanges(t *testing.T) {
+	m := scrollingModel()
+	for step := 0; step < 16; step++ {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updated.(model)
+	}
+	if m.scrollTop == 0 {
+		t.Fatal("expected the window to have advanced before filtering")
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m = updated.(model)
+	for _, r := range "zzz-no-match" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model)
+	}
+	if !m.localSearchActive {
+		t.Fatal("expected the local search to be active")
+	}
+	if got := len(m.repositoryListRows()); got != 0 {
+		t.Fatalf("a non-matching filter should empty the list, got %d rows", got)
+	}
+	if m.scrollTop != 0 {
+		t.Fatalf("scrollTop after filtering to no rows = %d, want 0", m.scrollTop)
+	}
+}

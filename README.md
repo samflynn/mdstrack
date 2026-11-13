@@ -36,6 +36,8 @@ Press `?` for the keyboard-shortcuts overlay; Esc closes it. The overlay is capp
 
 The layout is borderless: a title line, the workspace path, one accent rule, the body, and a persistent footer. Every screen renders exactly the terminal's row and column count, so nothing is clipped or wrapped at any size, and long repository names, paths, and inputs are truncated to the available cells — measured in terminal cells rather than bytes, so CJK and emoji names stay aligned.
 
+The Tracking section is pinned to the top of the list, so it stays visible however far you scroll. It holds still as a block — its title, its group headings, and its tracked repositories — while the remaining groups scroll beneath it. The selected row moves freely through the visible window instead of being held against the top edge, and a `n–m of total` indicator appears in the body whenever part of the list is scrolled out of view. Rows are counted across the whole list, so the first tracked row is always row 1. If the terminal is too short to hold the pinned section and a scrolled row at once, the list falls back to scrolling as a whole so the selection is never hidden.
+
 The footer carries the key legend on the left and the refresh countdown on the right, and it is replaced while a prompt is open or a status message is showing. Legend entries are `↑/↓` move, `Enter` track, `/` search, `o` open, `g` GitHub, and `?` help.
 
 Transient status messages, such as a failed action or a completed clone, clear themselves after a few seconds, so the footer always returns to the legend. A newer message replaces an older one without the older message's timer clearing it early.
